@@ -1,15 +1,4 @@
-This is a comprehensive `README.md` file designed for your SynapseAI project. It includes a professional description, a detailed feature list, a complex architecture diagram explaining the internal workings, and step-by-step setup instructions.
 
-### **Instructions:**
-
-1. Go to your GitHub repository main page.
-2. Click on the **"Add README"** button (or edit the existing `README.md` if one was created automatically).
-3. Paste the entire block of Markdown text below into the editor.
-4. Commit the changes. GitHub will automatically render the diagram and formatting.
-
----
-
-```markdown
 # 🧠 Synapse AI
 ### A Local, Privacy-First AI Assistant with Hybrid Long-Term Memory and Voice Capability.
 
@@ -209,7 +198,5 @@ Contributions, issues, and feature requests are welcome! Feel free to check the 
 ## 📄 License
 
 Distributed under the MIT License. See `LICENSE` for more information.
-
-```
 
 ```
