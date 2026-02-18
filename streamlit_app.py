@@ -4,7 +4,7 @@ from chatbot_backend import chatbot, retrieve_all_threads, delete_thread_data, g
 from langchain_core.messages import HumanMessage, AIMessage
 from streamlit_mic_recorder import speech_to_text
 
-# --- PAGE CONFIG ---
+# page config
 st.set_page_config(
     page_title="Synapse AI", 
     page_icon="🧠", 
@@ -12,7 +12,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- ADVANCED CUSTOM CSS (Cyberpunk + Scrollbar + Hero Cards) ---
+# css
 st.markdown("""
 <style>
     /* 1. GLOBAL THEME & TYPOGRAPHY */
@@ -122,7 +122,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- SESSION STATE ---
+# SESSION STATE-
 if "thread_id" not in st.session_state:
     st.session_state["thread_id"] = str(uuid.uuid4())
 if "titles" not in st.session_state:
@@ -130,7 +130,7 @@ if "titles" not in st.session_state:
 if "hero_prompt" not in st.session_state:
     st.session_state["hero_prompt"] = None
 
-# --- HELPER: Load Chat ---
+# HELPER: Load Chat
 def load_chat(thread_id):
     st.session_state["thread_id"] = thread_id
     st.session_state["messages"] = []
@@ -153,7 +153,7 @@ def load_chat(thread_id):
                 title = generate_summary(user_msgs[0].content)
                 st.session_state["titles"][thread_id] = title
 
-# --- SIDEBAR UI ---
+# SIDEBAR UI 
 with st.sidebar:
     st.markdown('<div class="sidebar-title">🧠 Synapse AI</div>', unsafe_allow_html=True)
     
@@ -203,20 +203,20 @@ with st.sidebar:
                     st.session_state["messages"] = []
                 st.rerun()
 
-# --- MAIN CHAT AREA ---
+#  MAIN CHAT AREA 
 
-# Initialize Messages
+# Initializing Messages
 if "messages" not in st.session_state:
     st.session_state["messages"] = []
 
-# --- HERO SECTION (Welcome Screen) ---
-# Only show this if there are no messages yet
+#  (Welcome Screen) 
+# Only showing this if there are no messages yet
 if not st.session_state["messages"]:
-    st.markdown("<br><br>", unsafe_allow_html=True) # Spacer
+    st.markdown("<br><br>", unsafe_allow_html=True) 
     st.markdown("<h1 style='text-align: center; color: #e6edf3;'>How can I help you today?</h1>", unsafe_allow_html=True)
     st.markdown("<p style='text-align: center; color: #94a3b8; margin-bottom: 50px;'>I can help you write code, analyze data, or just chat.</p>", unsafe_allow_html=True)
     
-    # 3 Suggestion Cards
+    # 3 Suggestion cards
     col1, col2, col3 = st.columns(3)
     
     with col1:
@@ -234,7 +234,7 @@ if not st.session_state["messages"]:
             st.session_state["hero_prompt"] = "Explain Quantum Computing in simple terms."
             st.rerun()
 
-# --- CHAT HISTORY ---
+# CHAT HISTORY--
 # If messages exist, show them
 for msg in st.session_state["messages"]:
     if msg["role"] == "user":
@@ -244,7 +244,7 @@ for msg in st.session_state["messages"]:
         with st.chat_message("assistant", avatar="🧠"):
             st.markdown(msg["content"])
 
-# --- INPUT HANDLING ---
+#  INPUT HANDLING 
 chat_input_text = st.chat_input("Ask anything...")
 
 final_prompt = None
@@ -260,10 +260,10 @@ elif chat_input_text:
 
 # Process Logic
 if final_prompt:
-    # 1. Add User Message
+    # 1. Adding User Message
     st.session_state["messages"].append({"role": "user", "content": final_prompt})
     
-    # Force redraw to show user message immediately if it came from Hero/Voice
+    # Forcing redraw to show user message immediately if it came from Hero/Voice
     if voice_text or st.session_state.get("hero_prompt_triggered"):
          st.rerun() 
          
