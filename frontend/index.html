@@ -1,0 +1,107 @@
+<script>
+const API="http://127.0.0.1:8000";
+let currentThread=null, es=null, autoScroll=true;
+const chat=document.getElementById('chat');
+const threads=document.getElementById('threads');
+const input=document.getElementById('input');
+
+function nearBottom(){return chat.scrollHeight-chat.scrollTop-chat.clientHeight<120}
+chat.addEventListener('scroll',()=>autoScroll=nearBottom())
+
+function bubble(role,content){
+ const d=document.createElement('div');
+ d.className='message '+(role==='user'?'user':'ai');
+ const inner=document.createElement('div');
+ inner.innerHTML=marked.parse(content||'');
+ d.appendChild(inner);
+ chat.appendChild(d);
+ if(autoScroll)chat.scrollTop=chat.scrollHeight;
+ return inner
+}
+
+function typing(){
+    if(document.getElementById('typing')) return;
+    const t=document.createElement('div');
+    t.className='typing';t.id='typing';t.textContent='Synapse AI is thinking...';
+    chat.appendChild(t);chat.scrollTop=chat.scrollHeight
+}
+function stopTyping(){const t=document.getElementById('typing');if(t)t.remove()}
+
+async function loadThreads(){
+ try {
+     const r=await fetch(API+'/threads');const j=await r.json();threads.innerHTML='';
+     const s=document.createElement('div');s.className='section';s.textContent='Threads';threads.appendChild(s);
+     j.threads.forEach(t=>{
+      const d=document.createElement('div');
+      d.className=`thread ${t.thread_id === currentThread ? 'active' : ''}`;
+      d.innerHTML=`<b>${t.title}</b><div class='preview'>${t.thread_id.slice(0,8)}</div>`;
+      d.onclick=()=>loadChat(t.thread_id);
+      threads.appendChild(d);
+     })
+ } catch(e) { console.error("API offline"); }
+}
+
+async function loadChat(id){
+ if(es){es.close();es=null}
+ currentThread=id;chat.innerHTML='';
+ loadThreads(); 
+ const r=await fetch(API+'/threads/'+id);const j=await r.json();
+ j.messages.forEach(m=>{if(m.role==='user'||m.role==='assistant')bubble(m.role,m.content)})
+}
+
+async function newChat(){
+    const r=await fetch(API+'/threads',{method:'POST'});
+    const j=await r.json();
+    currentThread=j.thread_id;
+    chat.innerHTML='';
+    loadThreads()
+}
+
+document.getElementById('composer').onsubmit=async e=>{
+ e.preventDefault();
+ const text=input.value.trim();
+ if(!text)return;
+ 
+ if(!currentThread) await newChat();
+
+ input.value='';
+ bubble('user',text);
+ typing();
+ 
+ const url=new URL(API+'/chat/stream');
+ url.searchParams.set('message',text);
+ url.searchParams.set('thread_id',currentThread);
+ url.searchParams.set('request_id', "req_" + Date.now());
+
+ if(es)es.close();
+ es=new EventSource(url);
+ 
+ let buf='';
+ let box;
+ 
+ es.addEventListener('message',ev=>{
+    if(!box){stopTyping();box=bubble('assistant','')}
+    const d=JSON.parse(ev.data);
+    buf+=d.delta||'';
+    box.innerHTML=marked.parse(buf);
+    if(autoScroll)chat.scrollTop=chat.scrollHeight
+ });
+
+ // STOP LOOP: Close on 'done'
+ es.addEventListener('done',()=>{
+     es.close();
+     es = null; 
+     loadThreads();
+ });
+ 
+ // STOP LOOP: Close on 'error'
+ es.onerror = (err) => {
+     console.log("Stream ended or error");
+     stopTyping();
+     es.close(); // <--- CRITICAL: FORCE CLOSE TO PREVENT RETRY
+     es = null;
+ };
+};
+
+loadThreads();
+</script>
