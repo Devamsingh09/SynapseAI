@@ -58,18 +58,23 @@ graph TD
         Orchestrator{"🔄 StateGraph Orchestrator"}
         
         subgraph MemorySystem ["🧠 Hybrid Memory System"]
-            ShortTerm[📝 Short-Term Buffer<br>(Raw recent msgs)]
-            LongTerm[🗂️ Long-Term Summary<br>(Compressed Context)]
+            ShortTerm["`📝 Short-Term Buffer
+            (Raw recent msgs)`"]
+            LongTerm["`🗂️ Long-Term Summary
+            (Compressed Context)`"]
         end
         
-        CheckTrigger{"❓ Trigger Summary?<br>(>12 Messages)"}
+        CheckTrigger{"`❓ Trigger Summary?
+        (>12 Messages)`"}
         SummarizerNode["⚙️ Summarize Node"]
     end
 
     %% --- AI Model Layer ---
     subgraph AI_Models ["🤖 Ollama Local Models"]
-        MainBrain["🧠 Qwen 2.5 (1.5B)<br>(Chat & Reasoning)"]
-        MiniBrain["🧠 Qwen 2.5 (0.5B)<br>(Memory Compression)"]
+        MainBrain["`🧠 Qwen 2.5 (1.5B)
+        (Chat & Reasoning)`"]
+        MiniBrain["`🧠 Qwen 2.5 (0.5B)
+        (Memory Compression)`"]
     end
 
     %% --- Tools Layer ---
@@ -113,14 +118,11 @@ graph TD
 1. **Python 3.10 or higher installed.**
 2. **Git installed.**
 3. **Ollama Installed & Models Pulled:**
-Synapse AI relies on Ollama to run models locally.
 * Download [Ollama](https://ollama.com/download).
-* Open your terminal and pull the required models:
+* Pull the required models:
 ```bash
 ollama pull qwen2.5:1.5b
 ollama pull qwen2.5:0.5b
-# (Optional: Pull an embedding model if using RAG features)
-# ollama pull nomic-embed-text
 
 ```
 
@@ -138,13 +140,10 @@ cd SynapseAI
 ```
 
 
-2. **Create a Virtual Environment (Recommended):**
+2. **Create a Virtual Environment:**
 ```bash
 python -m venv venv
-# Activate on Windows:
-venv\Scripts\activate
-# Activate on Mac/Linux:
-source venv/bin/activate
+source venv/bin/activate  # On Windows use: venv\Scripts\activate
 
 ```
 
@@ -157,40 +156,25 @@ pip install -r requirements.txt
 
 
 4. **Environment Configuration:**
-* Create a file named `.env` in the root directory.
-* Add necessary API keys for external tools (e.g., Tavily for search).
-
-
-```env
-# Example .env content
-TAVILY_API_KEY=your_tavily_api_key_here
-# Add other keys required by tools.py
-
-```
+* Create a `.env` file and add your `TAVILY_API_KEY` for search capabilities.
 
 
 
 ### ▶️ Running the Application
-
-Ensure your virtual environment is active and Ollama is running in the background.
 
 ```bash
 streamlit run app.py
 
 ```
 
-The application will launch in your default web browser, typically at `http://localhost:8501`.
-
 ---
 
 ## 🤝 Contributing
 
-Contributions, issues, and feature requests are welcome! Feel free to check the [issues page](https://www.google.com/search?q=https://github.com/Devamsingh09/SynapseAI/issues) if you want to contribute.
-
 1. Fork the repository.
 2. Create your feature branch (`git checkout -b feature/AmazingFeature`).
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`).
-4. Push to the branch (`git push origin feature/AmazingFeature`).
+3. Commit your changes.
+4. Push to the branch.
 5. Open a Pull Request.
 
 ---
@@ -200,3 +184,4 @@ Contributions, issues, and feature requests are welcome! Feel free to check the 
 Distributed under the MIT License. See `LICENSE` for more information.
 
 ```
+
