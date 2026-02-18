@@ -11,30 +11,30 @@ from tools import rag_tool, web_search, calculator, get_stock_price, current_dat
 
 load_dotenv()
 
-# --- 1. SETUP MODELS ---
+#  1. SETUP MODELS 
 # Main Chat Model (Smart & Capable)
 llm = ChatOllama(model="qwen2.5:1.5b", temperature=0, streaming=True)
 
 # Summary Model (Fast & Efficient for Memory)
 summary_llm = ChatOllama(model="qwen2.5:0.5b", temperature=0)
 
-# --- 2. DEFINE TOOLS ---
+# 2. DEFINE TOOLS 
 tools = [rag_tool, web_search, calculator, get_stock_price, current_datetime]
 llm_with_tools = llm.bind_tools(tools)
 
-# --- 3. DEFINE STATE ---
+# 3. DEFINE STATE 
 class ChatState(TypedDict):
     messages: Annotated[list, add_messages]
     summary: str
 
-# --- 4. NODES ---
+#  4. NODES 
 
 def chat_node(state: ChatState):
     """Main Chat Node with Long-Term Memory Injection"""
     summary = state.get("summary", "")
     messages = state["messages"]
 
-    # Inject Summary if it exists
+    # Injecting Summary if it exists
     if summary:
         system_msg = SystemMessage(content=f"Long-Term Memory (Summary of past events): {summary}")
         # We insert the summary at the start of the context
@@ -75,7 +75,7 @@ def summarize_conversation(state: ChatState):
     response = summary_llm.invoke([HumanMessage(content=prompt)])
     new_summary = response.content
     
-    # Delete the processed messages from DB to free up tokens
+    # Deleting the processed messages from DB to free up tokens
     delete_messages = [RemoveMessage(id=m.id) for m in messages_to_summarize]
     
     return {"summary": new_summary, "messages": delete_messages}
@@ -95,7 +95,7 @@ def should_summarize(state: ChatState) -> Literal["summarize_conversation", "too
     # 3. Otherwise, stop and wait for user
     return END
 
-# --- 5. GRAPH CONSTRUCTION ---
+#  5. GRAPH CONSTRUCTION 
 
 conn = sqlite3.connect('chatbot.db', check_same_thread=False)
 checkpointer = SqliteSaver(conn=conn)
@@ -114,7 +114,7 @@ graph.add_edge("summarize_conversation", END)
 
 chatbot = graph.compile(checkpointer=checkpointer)
 
-# --- HELPER FUNCTIONS ---
+# HELPER FUNCTIONS 
 
 def retrieve_all_threads():
     cursor = conn.cursor()
