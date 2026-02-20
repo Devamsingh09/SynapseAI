@@ -1,6 +1,7 @@
 
 # 🧠 Synapse AI
 ### A Local, Privacy-First AI Assistant with Hybrid Long-Term Memory and Voice Capability.
+## Demo Link : https://drive.google.com/file/d/1Y9eeqA2RKVT3f2rxlssWHSOfGBOLTqaQ/view?usp=sharing
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
