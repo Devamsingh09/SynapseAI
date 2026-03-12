@@ -151,7 +151,7 @@ function Hero({ onPrompt }) {
   return (
     <div className="hero">
       <div className="hero-head">
-        <div className="hero-eyebrow">Local AI Assistant</div>
+        <div className="hero-eyebrow">Multi-Purpose AI Assistant</div>
         <h1 className="hero-title">What can I help you<br /><span>build today?</span></h1>
         <p className="hero-sub">Ask anything — code, data, concepts, or just a conversation.</p>
       </div>
