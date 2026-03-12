@@ -90,7 +90,7 @@ function Sidebar({ threads, titles, threadId, onNew, onLoad, onDelete, onVoice, 
           <div className="logo-orb">🧠</div>
           <div>
             <div className="logo-name">Synapse AI</div>
-            <div className="logo-tag">Powered by local LLM</div>
+            <div className="logo-tag">Powered by LLama 3.3 LLM</div>
           </div>
         </div>
 
@@ -231,7 +231,7 @@ function InputBar({ value, onChange, onSend, disabled }) {
           }
         </button>
       </div>
-      <p className="input-hint">Synapse AI runs locally — your conversations stay on your machine.</p>
+      <p className="input-hint">Synapse AI runs on the cloud — your conversations are safe with us.</p>
     </div>
   );
 }
