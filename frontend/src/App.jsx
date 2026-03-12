@@ -9,22 +9,23 @@ import { v4 as uuid } from "uuid";
 // ═══════════════════════════════════════════════════════
 const BASE = process.env.REACT_APP_API_URL || "http://localhost:8000";
 
-// ✅ FIX: Removed isSummaryMessage() entirely — no longer needed
-// since the backend now correctly tags summarizer output with
-// langgraph_node metadata, preventing it from leaking into the stream.
-
 const api = {
   newThread:    ()    => fetch(`${BASE}/thread/new`, { method: "POST" }).then(r => r.json()).then(d => d.thread_id),
   getThreads:   ()    => fetch(`${BASE}/threads`).then(r => r.json()).then(d => d.threads || []),
+
   getHistory:   (tid) => fetch(`${BASE}/thread/${tid}/history`)
     .then(r => r.ok ? r.json() : { messages: [], title: "New Conversation" })
     .then(data => ({
       ...data,
-      // ✅ FIX: Removed isSummaryMessage filter — no longer needed
       messages: data.messages || []
     })),
+
   deleteThread: (tid) => fetch(`${BASE}/thread/${tid}`, { method: "DELETE" }),
-  getSummary:   (txt) => fetch(`${BASE}/chat/summary`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: txt }) }).then(r => r.json()).then(d => d.title || "New Conversation"),
+  getSummary:   (txt) => fetch(`${BASE}/chat/summary`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text: txt })
+  }).then(r => r.json()).then(d => d.title || "New Conversation"),
 
   async streamChat(threadId, message, onToken) {
     const res = await fetch(`${BASE}/chat/stream`, {
@@ -141,9 +142,9 @@ function Sidebar({ threads, titles, threadId, onNew, onLoad, onDelete, onVoice, 
 // HERO
 // ═══════════════════════════════════════════════════════
 const CARDS = [
-  { icon: "🐍", title: "Write Python Code",    desc: "Scripts, automation, data pipelines — generated instantly.",  prompt: "Write a Python script to automate a daily task." },
-  { icon: "📊", title: "Analyze Data",          desc: "Pandas, visualizations, stats — explained step by step.",     prompt: "How do I use Pandas to analyze a CSV file?" },
-  { icon: "💡", title: "Explain Any Concept",  desc: "Complex ideas broken down into clear, simple language.",      prompt: "Explain how neural networks work in simple terms." },
+  { icon: "🐍", title: "Write Python Code",   desc: "Scripts, automation, data pipelines — generated instantly.", prompt: "Write a Python script to automate a daily task." },
+  { icon: "📊", title: "Analyze Data",         desc: "Pandas, visualizations, stats — explained step by step.",    prompt: "How do I use Pandas to analyze a CSV file?" },
+  { icon: "💡", title: "Explain Any Concept", desc: "Complex ideas broken down into clear, simple language.",     prompt: "Explain how neural networks work in simple terms." },
 ];
 
 function Hero({ onPrompt }) {
@@ -248,36 +249,50 @@ export default function App() {
   const [input,       setInput]       = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
+  // ✅ FIX: threadMessages stores the FULL message history per thread
+  // locally in the frontend — completely independent from backend state.
+  // Backend can delete messages for memory management, but the UI
+  // always shows the complete conversation the user has seen.
+  const [threadMessages, setThreadMessages] = useState({});
+
   const streamRef = useRef("");
   const bottomRef = useRef(null);
 
-  // load threads on mount
+  // Load threads on mount
   useEffect(() => {
     api.getThreads().then(ids => {
       setThreads(ids);
       ids.forEach(tid =>
-        api.getHistory(tid).then(h =>
-          setTitles(p => ({ ...p, [tid]: h.title || "New Conversation" }))
-        )
+        api.getHistory(tid).then(h => {
+          setTitles(p => ({ ...p, [tid]: h.title || "New Conversation" }));
+          // ✅ Only populate threadMessages if we don't already have it locally
+          setThreadMessages(p => {
+            if (p[tid]) return p; // already have local copy, don't overwrite
+            return { ...p, [tid]: h.messages || [] };
+          });
+        })
       );
     });
   }, []);
 
-  // auto-scroll
+  // Auto-scroll
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, streamMsg]);
 
-  const loadThread = useCallback(async (tid) => {
-    const h = await api.getHistory(tid);
+  const loadThread = useCallback((tid) => {
+    // ✅ FIX: Never re-fetch from backend when switching threads.
+    // Always use our local threadMessages copy which has the full history.
+    if (tid === threadId) return;
     setThreadId(tid);
-    setMessages(h.messages || []);
-    setTitles(p => ({ ...p, [tid]: h.title || "New Conversation" }));
-  }, []);
+    setMessages(threadMessages[tid] || []);
+  }, [threadId, threadMessages]);
 
   const newThread = useCallback(async () => {
     const tid = await api.newThread();
-    setThreadId(tid); setMessages([]);
+    setThreadId(tid);
+    setMessages([]);
     setThreads(p => [...p, tid]);
     setTitles(p => ({ ...p, [tid]: "New Conversation" }));
+    setThreadMessages(p => ({ ...p, [tid]: [] }));
     setSidebarOpen(false);
   }, []);
 
@@ -285,6 +300,8 @@ export default function App() {
     await api.deleteThread(tid);
     setThreads(p => p.filter(t => t !== tid));
     setTitles(p => { const n = { ...p }; delete n[tid]; return n; });
+    // ✅ Also clean up local message store
+    setThreadMessages(p => { const n = { ...p }; delete n[tid]; return n; });
     if (tid === threadId) { setThreadId(uuid()); setMessages([]); }
   }, [threadId]);
 
@@ -293,9 +310,16 @@ export default function App() {
     setInput("");
 
     if (!threads.includes(threadId)) setThreads(p => [...p, threadId]);
-    setMessages(p => [...p, { role: "user", content: text }]);
 
-    // auto-title on first message
+    // ✅ FIX: Append user message both to display state AND local thread store
+    const userMsg = { role: "user", content: text };
+    setMessages(p => {
+      const updated = [...p, userMsg];
+      setThreadMessages(prev => ({ ...prev, [threadId]: updated }));
+      return updated;
+    });
+
+    // Auto-title on first message
     const isFirst = messages.filter(m => m.role === "user").length === 0;
     if (isFirst) {
       text.length >= 15
@@ -304,18 +328,29 @@ export default function App() {
     }
 
     setStreaming(true); streamRef.current = ""; setStreamMsg("");
+
     try {
       const full = await api.streamChat(threadId, text, token => {
         streamRef.current += token;
-        // ✅ FIX: Removed isSummaryMessage check — stream is now clean
         setStreamMsg(streamRef.current);
       });
-      // ✅ FIX: Removed isSummaryMessage check — response is now reliable
+
       if (full) {
-        setMessages(p => [...p, { role: "assistant", content: full }]);
+        // ✅ FIX: Append assistant message both to display state AND local thread store
+        const assistantMsg = { role: "assistant", content: full };
+        setMessages(p => {
+          const updated = [...p, assistantMsg];
+          setThreadMessages(prev => ({ ...prev, [threadId]: updated }));
+          return updated;
+        });
       }
     } catch (err) {
-      setMessages(p => [...p, { role: "assistant", content: `⚠️ **Error:** ${err.message}` }]);
+      const errMsg = { role: "assistant", content: `⚠️ **Error:** ${err.message}` };
+      setMessages(p => {
+        const updated = [...p, errMsg];
+        setThreadMessages(prev => ({ ...prev, [threadId]: updated }));
+        return updated;
+      });
     } finally {
       setStreaming(false); setStreamMsg(""); streamRef.current = "";
     }
