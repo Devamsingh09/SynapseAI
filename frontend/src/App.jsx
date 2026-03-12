@@ -9,11 +9,20 @@ import { v4 as uuid } from "uuid";
 // ═══════════════════════════════════════════════════════
 const BASE = process.env.REACT_APP_API_URL || "http://localhost:8000";
 
+// ✅ FIX: Removed isSummaryMessage() entirely — no longer needed
+// since the backend now correctly tags summarizer output with
+// langgraph_node metadata, preventing it from leaking into the stream.
 
 const api = {
   newThread:    ()    => fetch(`${BASE}/thread/new`, { method: "POST" }).then(r => r.json()).then(d => d.thread_id),
   getThreads:   ()    => fetch(`${BASE}/threads`).then(r => r.json()).then(d => d.threads || []),
-  getHistory:   (tid) => fetch(`${BASE}/thread/${tid}/history`).then(r => r.ok ? r.json() : { messages: [], title: "New Conversation" }),
+  getHistory:   (tid) => fetch(`${BASE}/thread/${tid}/history`)
+    .then(r => r.ok ? r.json() : { messages: [], title: "New Conversation" })
+    .then(data => ({
+      ...data,
+      // ✅ FIX: Removed isSummaryMessage filter — no longer needed
+      messages: data.messages || []
+    })),
   deleteThread: (tid) => fetch(`${BASE}/thread/${tid}`, { method: "DELETE" }),
   getSummary:   (txt) => fetch(`${BASE}/chat/summary`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: txt }) }).then(r => r.json()).then(d => d.title || "New Conversation"),
 
@@ -298,9 +307,13 @@ export default function App() {
     try {
       const full = await api.streamChat(threadId, text, token => {
         streamRef.current += token;
+        // ✅ FIX: Removed isSummaryMessage check — stream is now clean
         setStreamMsg(streamRef.current);
       });
-      setMessages(p => [...p, { role: "assistant", content: full }]);
+      // ✅ FIX: Removed isSummaryMessage check — response is now reliable
+      if (full) {
+        setMessages(p => [...p, { role: "assistant", content: full }]);
+      }
     } catch (err) {
       setMessages(p => [...p, { role: "assistant", content: `⚠️ **Error:** ${err.message}` }]);
     } finally {
