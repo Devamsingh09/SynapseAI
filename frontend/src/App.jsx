@@ -268,7 +268,7 @@ const VOICE_LABELS = {
   interrupted: "Interrupted — listening…",
 };
 
-function VoicePanel({ phase, onStop, compact, onInterrupt }) {
+function VoicePanel({ phase, onStop, compact }) {
   return (
     <div className={`voice-panel ${compact ? "voice-panel-compact" : ""}`}>
       <div className={`voice-orb ${phase}`}>
@@ -283,19 +283,14 @@ function VoicePanel({ phase, onStop, compact, onInterrupt }) {
       </div>
       <div className="voice-status">{VOICE_LABELS[phase] || phase}</div>
       <p className="voice-sub">
-        {phase === "listening" && "Speak now — pause 2s when done. Talk anytime to interrupt."}
+        {phase === "listening" && "Speak now — pause 2s when done."}
         {phase === "processing" && "Got it — sending in a moment…"}
-        {phase === "thinking" && "Thinking… speak anytime to interrupt."}
-        {phase === "speaking" && "Speaking… say something to interrupt."}
+        {phase === "thinking" && "Thinking… just speak to interrupt."}
+        {phase === "speaking" && "Speaking… just speak to interrupt."}
         {phase === "interrupted" && "What would you like to say?"}
         {phase === "transcribing" && "Processing your speech…"}
       </p>
-      <div className="voice-actions">
-        {(phase === "speaking" || phase === "thinking") && onInterrupt && (
-          <button type="button" className="voice-interrupt" onClick={onInterrupt}>Interrupt</button>
-        )}
-        <button type="button" className="voice-stop" onClick={onStop}>Stop Voice Chat</button>
-      </div>
+      <button type="button" className="voice-stop" onClick={onStop}>Stop Voice Chat</button>
     </div>
   );
 }
@@ -730,7 +725,7 @@ export default function App() {
         {showHero
           ? <Hero onPrompt={send} onVoiceChat={toggleVoiceMode} voiceSupported={voiceSupported} />
           : voiceMode && messages.length === 0
-          ? <div className="voice-main-empty"><VoicePanel phase={voicePhase} onStop={stopVoiceMode} onInterrupt={onVoiceInterrupt} /></div>
+          ? <div className="voice-main-empty"><VoicePanel phase={voicePhase} onStop={stopVoiceMode} /></div>
           : <div className="messages">
               {messages.map((m, i) => <Message key={i} role={m.role} content={m.content} />)}
               {streaming && streamMsg  && <Message role="assistant" content={streamMsg} streaming />}
@@ -748,7 +743,7 @@ export default function App() {
           voiceSupported={voiceSupported}
         />
         {voiceMode && messages.length > 0 && (
-          <VoicePanel phase={voicePhase} onStop={stopVoiceMode} compact onInterrupt={onVoiceInterrupt} />
+          <VoicePanel phase={voicePhase} onStop={stopVoiceMode} compact />
         )}
       </main>
     </div>

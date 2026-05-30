@@ -610,24 +610,6 @@ body {
 }
 .voice-stop:hover { border-color: var(--danger); color: var(--danger); }
 
-.voice-actions {
-  display: flex; gap: 8px; flex-wrap: wrap; justify-content: center;
-}
-.voice-interrupt {
-  background: rgba(245, 158, 11, 0.12);
-  border: 1px solid rgba(245, 158, 11, 0.45);
-  color: var(--amber);
-  border-radius: 999px;
-  padding: 6px 14px;
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all var(--ease);
-}
-.voice-interrupt:hover {
-  border-color: var(--amber);
-  box-shadow: 0 0 14px rgba(245, 158, 11, 0.25);
-}
 .voice-orb.interrupted .voice-orb-core {
   animation: voice-pulse 1s ease-in-out infinite;
   border-color: var(--amber);
