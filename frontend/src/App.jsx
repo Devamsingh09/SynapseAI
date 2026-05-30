@@ -8,7 +8,7 @@ import {
   SpeechQueue,
   extractNewSentences,
   transcribeWithFallback,
-  checkVoiceStatus,
+  isVoiceSupported,
 } from "./voiceChat";
 
 // ═══════════════════════════════════════════════════════
@@ -65,28 +65,10 @@ const api = {
 };
 
 // ═══════════════════════════════════════════════════════
-// VOICE HOOK
-// ═══════════════════════════════════════════════════════
-function useVoice(onResult) {
-  const [rec, setRec] = useState(false);
-  const supported = "SpeechRecognition" in window || "webkitSpeechRecognition" in window;
-  const toggle = useCallback(() => {
-    if (!supported) return alert("Speech recognition not supported in this browser.");
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (rec) { setRec(false); return; }
-    const r = new SR(); r.lang = "en-US"; r.interimResults = false;
-    r.onstart = () => setRec(true); r.onend = () => setRec(false); r.onerror = () => setRec(false);
-    r.onresult = (e) => onResult?.(e.results[0][0].transcript);
-    r.start();
-  }, [rec, supported, onResult]);
-  return { rec, supported, toggle };
-}
-
-// ═══════════════════════════════════════════════════════
 // SIDEBAR
 // ═══════════════════════════════════════════════════════
-function Sidebar({ threads, titles, threadId, onNew, onLoad, onDelete, onVoice, isOpen, onClose }) {
-  const { rec, supported, toggle } = useVoice(onVoice);
+function Sidebar({ threads, titles, threadId, onNew, onLoad, onDelete, onVoiceChat, voiceMode, isOpen, onClose }) {
+  const voiceSupported = isVoiceSupported();
   return (
     <>
       <div className={`overlay ${isOpen ? "open" : ""}`} onClick={onClose} />
@@ -109,15 +91,15 @@ function Sidebar({ threads, titles, threadId, onNew, onLoad, onDelete, onVoice, 
           New Conversation
         </button>
 
-        {/* Voice */}
-        {supported && (
-          <button className={`btn-voice ${rec ? "rec" : ""}`} onClick={toggle}>
+        {/* Full voice chat — talk to bot with tools + history */}
+        {voiceSupported && (
+          <button className={`btn-voice ${voiceMode ? "rec" : ""}`} onClick={onVoiceChat}>
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
               <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
               <line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
             </svg>
-            {rec ? "● Stop Recording" : "Voice Input"}
+            {voiceMode ? "● Voice Chat Active" : "Voice Chat"}
           </button>
         )}
 
@@ -149,22 +131,36 @@ function Sidebar({ threads, titles, threadId, onNew, onLoad, onDelete, onVoice, 
 // HERO
 // ═══════════════════════════════════════════════════════
 const CARDS = [
+  { icon: "🎙️", title: "Voice Chat",          desc: "Talk hands-free — Synapse listens, uses tools, and speaks back.", voice: true },
   { icon: "🐍", title: "Write Python Code",   desc: "Scripts, automation, data pipelines — generated instantly.", prompt: "Write a Python script to automate a daily task." },
   { icon: "📊", title: "Analyze Data",         desc: "Pandas, visualizations, stats — explained step by step.",    prompt: "How do I use Pandas to analyze a CSV file?" },
   { icon: "💡", title: "Explain Any Concept", desc: "Complex ideas broken down into clear, simple language.",     prompt: "Explain how neural networks work in simple terms." },
 ];
 
-function Hero({ onPrompt }) {
+function Hero({ onPrompt, onVoiceChat, voiceSupported }) {
   return (
     <div className="hero">
       <div className="hero-head">
         <div className="hero-eyebrow">Multi-Purpose AI Assistant</div>
         <h1 className="hero-title">What can I help you<br /><span>build today?</span></h1>
-        <p className="hero-sub">Ask anything — code, data, concepts, or just a conversation.</p>
+        <p className="hero-sub">Type, or use voice chat for a full talk-to-talk conversation with tools and memory.</p>
       </div>
+      {voiceSupported && (
+        <button type="button" className="hero-voice-cta" onClick={onVoiceChat}>
+          <span className="hero-voice-icon">🎙️</span>
+          <span className="hero-voice-text">
+            <strong>Start Voice Chat</strong>
+            <small>Speak naturally — replies are read aloud</small>
+          </span>
+        </button>
+      )}
       <div className="hero-cards">
-        {CARDS.map(c => (
-          <div className="hero-card" key={c.title} onClick={() => onPrompt(c.prompt)}>
+        {CARDS.filter(c => !c.voice || voiceSupported).map(c => (
+          <div
+            className={`hero-card ${c.voice ? "hero-card-voice" : ""}`}
+            key={c.title}
+            onClick={() => (c.voice ? onVoiceChat() : onPrompt(c.prompt))}
+          >
             <span className="c-icon">{c.icon}</span>
             <span className="c-title">{c.title}</span>
             <span className="c-desc">{c.desc}</span>
@@ -216,7 +212,7 @@ function Typing() {
 // ═══════════════════════════════════════════════════════
 // INPUT BAR
 // ═══════════════════════════════════════════════════════
-function InputBar({ value, onChange, onSend, disabled, voiceMode, onVoiceToggle, voiceReady }) {
+function InputBar({ value, onChange, onSend, disabled, voiceMode, onVoiceToggle, voiceSupported }) {
   const ref = useRef(null);
   useEffect(() => {
     if (ref.current) { ref.current.style.height = "auto"; ref.current.style.height = `${ref.current.scrollHeight}px`; }
@@ -231,19 +227,21 @@ function InputBar({ value, onChange, onSend, disabled, voiceMode, onVoiceToggle,
           onChange={e => onChange(e.target.value)}
           onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } }}
         />
-        {voiceReady && (
+        {voiceSupported && (
           <button
             type="button"
             className={`voice-btn ${voiceMode ? "active" : ""}`}
             onClick={onVoiceToggle}
             disabled={disabled && !voiceMode}
-            title={voiceMode ? "Exit voice chat" : "Start voice chat"}
+            title={voiceMode ? "Exit voice chat" : "Start voice chat — talk to Synapse with tools and history"}
+            aria-label={voiceMode ? "Exit voice chat" : "Start voice chat"}
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
               <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
               <line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
             </svg>
+            <span className="voice-btn-label">{voiceMode ? "Stop" : "Voice"}</span>
           </button>
         )}
         <button className="send-btn" onClick={submit} disabled={disabled || voiceMode || !value.trim()}>
@@ -270,9 +268,9 @@ const VOICE_LABELS = {
   speaking: "Speaking…",
 };
 
-function VoicePanel({ phase, onStop }) {
+function VoicePanel({ phase, onStop, compact }) {
   return (
-    <div className="voice-panel">
+    <div className={`voice-panel ${compact ? "voice-panel-compact" : ""}`}>
       <div className={`voice-orb ${phase}`}>
         <span className="voice-orb-core">🎙️</span>
         {(phase === "listening" || phase === "speaking") && (
@@ -284,6 +282,12 @@ function VoicePanel({ phase, onStop }) {
         )}
       </div>
       <div className="voice-status">{VOICE_LABELS[phase] || phase}</div>
+      <p className="voice-sub">
+        {phase === "listening" && "Ask anything — web search, docs, calculator, and chat history all work."}
+        {phase === "thinking" && "Synapse is thinking and may use tools…"}
+        {phase === "speaking" && "Listen to the reply…"}
+        {phase === "transcribing" && "Processing your speech…"}
+      </p>
       <button type="button" className="voice-stop" onClick={onStop}>Stop Voice Chat</button>
     </div>
   );
@@ -303,7 +307,7 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [voiceMode,    setVoiceMode]    = useState(false);
   const [voicePhase,   setVoicePhase]   = useState("idle");
-  const [voiceReady,   setVoiceReady]   = useState(false);
+  const voiceSupported = isVoiceSupported();
 
   // ✅ FIX: threadMessages stores the FULL message history per thread
   // locally in the frontend — completely independent from backend state.
@@ -323,10 +327,6 @@ export default function App() {
 
   useEffect(() => { voiceModeRef.current = voiceMode; }, [voiceMode]);
   useEffect(() => { streamingRef.current = streaming; }, [streaming]);
-
-  useEffect(() => {
-    checkVoiceStatus().then(s => setVoiceReady(s.stt || s.tts));
-  }, []);
 
   const stopVoiceMode = useCallback(() => {
     voiceLoopRef.current = false;
@@ -396,6 +396,10 @@ export default function App() {
   startListeningRef.current = startListening;
 
   const toggleVoiceMode = useCallback(() => {
+    if (!voiceSupported) {
+      alert("Voice chat requires microphone access. Please use Chrome or Edge.");
+      return;
+    }
     if (voiceMode) {
       stopVoiceMode();
       return;
@@ -403,8 +407,9 @@ export default function App() {
     speechQueueRef.current.reset();
     setVoiceMode(true);
     setVoicePhase("idle");
+    setSidebarOpen(false);
     setTimeout(() => startListening(), 100);
-  }, [voiceMode, stopVoiceMode, startListening]);
+  }, [voiceMode, stopVoiceMode, startListening, voiceSupported]);
 
   // Load threads on mount
   useEffect(() => {
@@ -542,7 +547,7 @@ export default function App() {
 
   const send = useCallback((text) => sendMessage(text, { fromVoice: false }), [sendMessage]);
 
-  const showHero = messages.length === 0 && !streaming;
+  const showHero = messages.length === 0 && !streaming && !voiceMode;
 
   return (
     <div className="app">
@@ -558,14 +563,17 @@ export default function App() {
         onNew={newThread}
         onLoad={tid => { loadThread(tid); setSidebarOpen(false); }}
         onDelete={removeThread}
-        onVoice={t => setInput(t)}
+        onVoiceChat={toggleVoiceMode}
+        voiceMode={voiceMode}
         isOpen={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
       />
 
       <main className="main">
         {showHero
-          ? <Hero onPrompt={send} />
+          ? <Hero onPrompt={send} onVoiceChat={toggleVoiceMode} voiceSupported={voiceSupported} />
+          : voiceMode && messages.length === 0
+          ? <div className="voice-main-empty"><VoicePanel phase={voicePhase} onStop={stopVoiceMode} /></div>
           : <div className="messages">
               {messages.map((m, i) => <Message key={i} role={m.role} content={m.content} />)}
               {streaming && streamMsg  && <Message role="assistant" content={streamMsg} streaming />}
@@ -580,9 +588,11 @@ export default function App() {
           disabled={streaming}
           voiceMode={voiceMode}
           onVoiceToggle={toggleVoiceMode}
-          voiceReady={voiceReady}
+          voiceSupported={voiceSupported}
         />
-        {voiceMode && <VoicePanel phase={voicePhase} onStop={stopVoiceMode} />}
+        {voiceMode && messages.length > 0 && (
+          <VoicePanel phase={voicePhase} onStop={stopVoiceMode} compact />
+        )}
       </main>
     </div>
   );

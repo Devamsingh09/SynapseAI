@@ -1,5 +1,15 @@
 const BASE = process.env.REACT_APP_API_URL || "http://localhost:8000";
 
+export function isVoiceSupported() {
+  return !!(
+    (typeof navigator !== "undefined" &&
+      navigator.mediaDevices &&
+      navigator.mediaDevices.getUserMedia) ||
+    (typeof window !== "undefined" &&
+      (window.SpeechRecognition || window.webkitSpeechRecognition))
+  );
+}
+
 const SENTENCE_RE = /[^.!?]+[.!?]+(?:\s|$)|[^.!?]+$/g;
 const MIN_SENTENCE_LEN = 12;
 
