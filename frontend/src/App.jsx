@@ -3,18 +3,6 @@ import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { v4 as uuid } from "uuid";
-import {
-  VoiceRecorder,
-  BrowserSpeechListener,
-  InterruptWatcher,
-  SpeechQueue,
-  extractNewSentences,
-  transcribeWithFallback,
-  hasBrowserSpeechRecognition,
-  isVoiceSupported,
-  VOICE_PAUSE_MS,
-  sleep,
-} from "./voiceChat";
 
 // ═══════════════════════════════════════════════════════
 // API
@@ -39,19 +27,17 @@ const api = {
     body: JSON.stringify({ text: txt })
   }).then(r => r.json()).then(d => d.title || "New Conversation"),
 
-  async streamChat(threadId, message, onToken, signal, onStatus) {
+  async streamChat(threadId, message, onToken) {
     const res = await fetch(`${BASE}/chat/stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ thread_id: threadId, message }),
-      signal,
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let full = "", buffer = "";
     while (true) {
-      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
@@ -63,12 +49,8 @@ const api = {
         try {
           const obj = JSON.parse(payload);
           if (obj.error) throw new Error(obj.error);
-          if (obj.status === "using_tools") { onStatus?.("using_tools"); continue; }
           if (obj.token) { full += obj.token; onToken(obj.token); }
-        } catch (e) {
-          if (e instanceof SyntaxError) continue;
-          throw e;
-        }
+        } catch (_) {}
       }
     }
     return full;
@@ -76,9 +58,28 @@ const api = {
 };
 
 // ═══════════════════════════════════════════════════════
+// VOICE HOOK
+// ═══════════════════════════════════════════════════════
+function useVoice(onResult) {
+  const [rec, setRec] = useState(false);
+  const supported = "SpeechRecognition" in window || "webkitSpeechRecognition" in window;
+  const toggle = useCallback(() => {
+    if (!supported) return alert("Speech recognition not supported in this browser.");
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (rec) { setRec(false); return; }
+    const r = new SR(); r.lang = "en-US"; r.interimResults = false;
+    r.onstart = () => setRec(true); r.onend = () => setRec(false); r.onerror = () => setRec(false);
+    r.onresult = (e) => onResult?.(e.results[0][0].transcript);
+    r.start();
+  }, [rec, supported, onResult]);
+  return { rec, supported, toggle };
+}
+
+// ═══════════════════════════════════════════════════════
 // SIDEBAR
 // ═══════════════════════════════════════════════════════
-function Sidebar({ threads, titles, threadId, onNew, onLoad, onDelete, isOpen, onClose }) {
+function Sidebar({ threads, titles, threadId, onNew, onLoad, onDelete, onVoice, isOpen, onClose }) {
+  const { rec, supported, toggle } = useVoice(onVoice);
   return (
     <>
       <div className={`overlay ${isOpen ? "open" : ""}`} onClick={onClose} />
@@ -100,6 +101,18 @@ function Sidebar({ threads, titles, threadId, onNew, onLoad, onDelete, isOpen, o
           </svg>
           New Conversation
         </button>
+
+        {/* Voice */}
+        {supported && (
+          <button className={`btn-voice ${rec ? "rec" : ""}`} onClick={toggle}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+              <line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
+            </svg>
+            {rec ? "● Stop Recording" : "Voice Input"}
+          </button>
+        )}
 
         {/* History */}
         <nav className="history">
@@ -129,36 +142,22 @@ function Sidebar({ threads, titles, threadId, onNew, onLoad, onDelete, isOpen, o
 // HERO
 // ═══════════════════════════════════════════════════════
 const CARDS = [
-  { icon: "🎙️", title: "Voice Chat",          desc: "Talk hands-free — Synapse listens, uses tools, and speaks back.", voice: true },
   { icon: "🐍", title: "Write Python Code",   desc: "Scripts, automation, data pipelines — generated instantly.", prompt: "Write a Python script to automate a daily task." },
   { icon: "📊", title: "Analyze Data",         desc: "Pandas, visualizations, stats — explained step by step.",    prompt: "How do I use Pandas to analyze a CSV file?" },
   { icon: "💡", title: "Explain Any Concept", desc: "Complex ideas broken down into clear, simple language.",     prompt: "Explain how neural networks work in simple terms." },
 ];
 
-function Hero({ onPrompt, onVoiceChat, voiceSupported }) {
+function Hero({ onPrompt }) {
   return (
     <div className="hero">
       <div className="hero-head">
         <div className="hero-eyebrow">Multi-Purpose AI Assistant</div>
         <h1 className="hero-title">What can I help you<br /><span>build today?</span></h1>
-        <p className="hero-sub">Type, or use voice chat for a full talk-to-talk conversation with tools and memory.</p>
+        <p className="hero-sub">Ask anything — code, data, concepts, or just a conversation.</p>
       </div>
-      {voiceSupported && (
-        <button type="button" className="hero-voice-cta" onClick={onVoiceChat}>
-          <span className="hero-voice-icon">🎙️</span>
-          <span className="hero-voice-text">
-            <strong>Start Voice Chat</strong>
-            <small>Speak naturally — replies are read aloud</small>
-          </span>
-        </button>
-      )}
       <div className="hero-cards">
-        {CARDS.filter(c => !c.voice || voiceSupported).map(c => (
-          <div
-            className={`hero-card ${c.voice ? "hero-card-voice" : ""}`}
-            key={c.title}
-            onClick={() => (c.voice ? onVoiceChat() : onPrompt(c.prompt))}
-          >
+        {CARDS.map(c => (
+          <div className="hero-card" key={c.title} onClick={() => onPrompt(c.prompt)}>
             <span className="c-icon">{c.icon}</span>
             <span className="c-title">{c.title}</span>
             <span className="c-desc">{c.desc}</span>
@@ -210,7 +209,7 @@ function Typing() {
 // ═══════════════════════════════════════════════════════
 // INPUT BAR
 // ═══════════════════════════════════════════════════════
-function InputBar({ value, onChange, onSend, disabled, voiceMode, onVoiceToggle, voiceSupported }) {
+function InputBar({ value, onChange, onSend, disabled }) {
   const ref = useRef(null);
   useEffect(() => {
     if (ref.current) { ref.current.style.height = "auto"; ref.current.style.height = `${ref.current.scrollHeight}px`; }
@@ -221,79 +220,18 @@ function InputBar({ value, onChange, onSend, disabled, voiceMode, onVoiceToggle,
       <div className="input-shell">
         <textarea ref={ref} rows={1} className="input-field"
           placeholder="Message Synapse AI…  (Enter to send, Shift+Enter for newline)"
-          value={value} disabled={disabled || voiceMode}
+          value={value} disabled={disabled}
           onChange={e => onChange(e.target.value)}
           onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } }}
         />
-        <div className="input-actions">
-          {voiceSupported && (
-            <button
-              type="button"
-              className={`voice-btn ${voiceMode ? "active" : ""}`}
-              onClick={onVoiceToggle}
-              disabled={disabled && !voiceMode}
-              title={voiceMode ? "Exit voice chat" : "Start voice chat — talk to Synapse with tools and history"}
-              aria-label={voiceMode ? "Exit voice chat" : "Start voice chat"}
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-                <line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
-              </svg>
-            </button>
-          )}
-          <button className="send-btn" onClick={submit} disabled={disabled || voiceMode || !value.trim()}>
-            {disabled
-              ? <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: "spin 0.9s linear infinite" }}><path d="M21 12a9 9 0 1 1-6.219-8.56" /><style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style></svg>
-              : <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
-            }
-          </button>
-        </div>
+        <button className="send-btn" onClick={submit} disabled={disabled || !value.trim()}>
+          {disabled
+            ? <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: "spin 0.9s linear infinite" }}><path d="M21 12a9 9 0 1 1-6.219-8.56" /><style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style></svg>
+            : <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
+          }
+        </button>
       </div>
-      <p className="input-hint">
-        {voiceMode
-          ? "Voice chat active — speak naturally, Synapse will listen and reply aloud."
-          : "Synapse AI runs on the cloud — your conversations are safe with us."}
-      </p>
-    </div>
-  );
-}
-
-const VOICE_LABELS = {
-  idle: "Starting…",
-  listening: "Listening…",
-  processing: "Processing…",
-  transcribing: "Understanding…",
-  thinking: "Thinking…",
-  using_tools: "Using tools…",
-  speaking: "Speaking…",
-  interrupted: "Interrupted — listening…",
-};
-
-function VoicePanel({ phase, onStop, compact }) {
-  return (
-    <div className={`voice-panel ${compact ? "voice-panel-compact" : ""}`}>
-      <div className={`voice-orb ${phase}`}>
-        <span className="voice-orb-core">🎙️</span>
-        {(phase === "listening" || phase === "speaking" || phase === "interrupted") && (
-          <>
-            <span className="voice-ring r1" />
-            <span className="voice-ring r2" />
-            <span className="voice-ring r3" />
-          </>
-        )}
-      </div>
-      <div className="voice-status">{VOICE_LABELS[phase] || phase}</div>
-      <p className="voice-sub">
-        {phase === "listening" && "Speak now — pause 2s when done."}
-        {phase === "processing" && "Got it — sending in a moment…"}
-        {phase === "thinking" && "Thinking… just speak to interrupt."}
-        {phase === "using_tools" && "Searching and running tools… just speak to interrupt."}
-        {phase === "speaking" && "Speaking… just speak to interrupt."}
-        {phase === "interrupted" && "What would you like to say?"}
-        {phase === "transcribing" && "Processing your speech…"}
-      </p>
-      <button type="button" className="voice-stop" onClick={onStop}>Stop Voice Chat</button>
+      <p className="input-hint">Synapse AI runs on the cloud — your conversations are safe with us.</p>
     </div>
   );
 }
@@ -310,9 +248,6 @@ export default function App() {
   const [streamMsg,   setStreamMsg]   = useState("");
   const [input,       setInput]       = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [voiceMode,    setVoiceMode]    = useState(false);
-  const [voicePhase,   setVoicePhase]   = useState("idle");
-  const voiceSupported = isVoiceSupported();
 
   // ✅ FIX: threadMessages stores the FULL message history per thread
   // locally in the frontend — completely independent from backend state.
@@ -322,228 +257,6 @@ export default function App() {
 
   const streamRef = useRef("");
   const bottomRef = useRef(null);
-  const speechQueueRef = useRef(new SpeechQueue());
-  const listenerRef = useRef(null);
-  const interruptRef = useRef(null);
-  const chatAbortRef = useRef(null);
-  const voiceTurnRef = useRef(0);
-  const voiceModeRef = useRef(false);
-  const streamingRef = useRef(false);
-  const voiceLoopRef = useRef(false);
-  const sendMessageRef = useRef(null);
-  const startListeningRef = useRef(null);
-
-  useEffect(() => { voiceModeRef.current = voiceMode; }, [voiceMode]);
-  useEffect(() => { streamingRef.current = streaming; }, [streaming]);
-
-  const stopVoiceMode = useCallback(() => {
-    voiceLoopRef.current = false;
-    voiceTurnRef.current += 1;
-    chatAbortRef.current?.abort();
-    chatAbortRef.current = null;
-    listenerRef.current?.stop();
-    listenerRef.current = null;
-    interruptRef.current?.stop();
-    interruptRef.current = null;
-    speechQueueRef.current.interrupt();
-    setVoiceMode(false);
-    setVoicePhase("idle");
-  }, []);
-
-  const stopInterruptWatch = useCallback(() => {
-    interruptRef.current?.stop();
-    interruptRef.current = null;
-  }, []);
-
-  const interruptCurrentTurn = useCallback(() => {
-    voiceTurnRef.current += 1;
-    chatAbortRef.current?.abort();
-    chatAbortRef.current = null;
-    speechQueueRef.current.interrupt();
-    stopInterruptWatch();
-    listenerRef.current?.stop();
-    listenerRef.current = null;
-    voiceLoopRef.current = false;
-    setStreaming(false);
-    setStreamMsg("");
-    streamRef.current = "";
-  }, [stopInterruptWatch]);
-
-  const onVoiceInterrupt = useCallback(() => {
-    if (!voiceModeRef.current) return;
-    interruptCurrentTurn();
-    setVoicePhase("interrupted");
-    setTimeout(() => startListeningRef.current?.({ afterInterrupt: true }), 150);
-  }, [interruptCurrentTurn]);
-
-  const startInterruptWatch = useCallback(() => {
-    if (!voiceModeRef.current || interruptRef.current) return;
-    const watcher = new InterruptWatcher({ onInterrupt: onVoiceInterrupt });
-    interruptRef.current = watcher;
-    watcher.start();
-  }, [onVoiceInterrupt]);
-
-  const restartVoiceListen = useCallback(async () => {
-    if (!voiceModeRef.current) return;
-    voiceLoopRef.current = false;
-    listenerRef.current?.stop();
-    listenerRef.current = null;
-    stopInterruptWatch();
-    setVoicePhase("processing");
-    await sleep(VOICE_PAUSE_MS);
-    if (!voiceModeRef.current || streamingRef.current) return;
-    startListeningRef.current?.();
-  }, [stopInterruptWatch]);
-
-  const handleVoiceTranscript = useCallback(async (text, { skipPause = false, isInterrupt = false } = {}) => {
-    if (!text?.trim() || !voiceModeRef.current) {
-      restartVoiceListen();
-      return;
-    }
-
-    voiceLoopRef.current = false;
-    listenerRef.current?.stop();
-    listenerRef.current = null;
-    stopInterruptWatch();
-
-    if (isInterrupt || streamingRef.current) {
-      interruptCurrentTurn();
-    }
-
-    if (!skipPause && !isInterrupt) {
-      setVoicePhase("processing");
-      await sleep(VOICE_PAUSE_MS);
-    }
-
-    if (!voiceModeRef.current) return;
-    await sendMessageRef.current?.(text.trim(), { fromVoice: true, isInterrupt });
-  }, [restartVoiceListen, interruptCurrentTurn, stopInterruptWatch]);
-
-  const startRecorderFallback = useCallback(() => {
-    if (!voiceModeRef.current || streamingRef.current || voiceLoopRef.current) return;
-
-    voiceLoopRef.current = true;
-    setVoicePhase("listening");
-
-    const recorder = new VoiceRecorder({
-      onSilence: async (blob) => {
-        voiceLoopRef.current = false;
-        if (!voiceModeRef.current) return;
-
-        if (!blob?.size || blob.size < 500) {
-          restartVoiceListen();
-          return;
-        }
-
-        try {
-          setVoicePhase("transcribing");
-          const text = await transcribeWithFallback(blob);
-          if (text) await handleVoiceTranscript(text, { skipPause: true });
-          else restartVoiceListen();
-        } catch {
-          restartVoiceListen();
-        }
-      },
-      onMaxDuration: async (blob) => {
-        voiceLoopRef.current = false;
-        if (!voiceModeRef.current || !blob?.size) return;
-        try {
-          setVoicePhase("transcribing");
-          const text = await transcribeWithFallback(blob);
-          if (text) await handleVoiceTranscript(text, { skipPause: true });
-          else restartVoiceListen();
-        } catch {
-          restartVoiceListen();
-        }
-      },
-      onError: () => {
-        voiceLoopRef.current = false;
-        if (voiceModeRef.current) {
-          alert("Microphone access is required for voice chat.");
-          stopVoiceMode();
-        }
-      },
-    });
-
-    listenerRef.current = recorder;
-    recorder.start().catch(() => {
-      voiceLoopRef.current = false;
-      stopVoiceMode();
-    });
-  }, [stopVoiceMode, handleVoiceTranscript, restartVoiceListen]);
-
-  const startListening = useCallback(({ afterInterrupt = false } = {}) => {
-    if (!voiceModeRef.current || voiceLoopRef.current) return;
-    if (streamingRef.current && !afterInterrupt) return;
-
-    voiceLoopRef.current = true;
-    setVoicePhase(afterInterrupt ? "interrupted" : "listening");
-    stopInterruptWatch();
-
-    if (hasBrowserSpeechRecognition()) {
-      const listener = new BrowserSpeechListener({
-        silenceMs: afterInterrupt ? 1200 : VOICE_PAUSE_MS,
-        onSpeechStart: () => {
-          if (streamingRef.current || speechQueueRef.current.playing) {
-            onVoiceInterrupt();
-          }
-        },
-        onResult: (text) => {
-          voiceLoopRef.current = false;
-          listenerRef.current = null;
-          handleVoiceTranscript(text, { isInterrupt: afterInterrupt });
-        },
-        onRestart: () => {
-          voiceLoopRef.current = false;
-          listenerRef.current = null;
-          if (voiceModeRef.current && !streamingRef.current) {
-            setTimeout(() => startListeningRef.current?.(), VOICE_PAUSE_MS);
-          }
-        },
-        onError: (err) => {
-          voiceLoopRef.current = false;
-          listenerRef.current = null;
-          if (err?.message === "not-allowed") {
-            alert("Microphone access is required for voice chat.");
-            stopVoiceMode();
-            return;
-          }
-          startRecorderFallback();
-        },
-      });
-
-      listenerRef.current = listener;
-      try {
-        listener.start();
-      } catch {
-        voiceLoopRef.current = false;
-        listenerRef.current = null;
-        startRecorderFallback();
-      }
-      return;
-    }
-
-    voiceLoopRef.current = false;
-    startRecorderFallback();
-  }, [stopVoiceMode, handleVoiceTranscript, startRecorderFallback, stopInterruptWatch, onVoiceInterrupt]);
-
-  startListeningRef.current = startListening;
-
-  const toggleVoiceMode = useCallback(() => {
-    if (!voiceSupported) {
-      alert("Voice chat requires microphone access. Please use Chrome or Edge.");
-      return;
-    }
-    if (voiceMode) {
-      stopVoiceMode();
-      return;
-    }
-    speechQueueRef.current.reset();
-    setVoiceMode(true);
-    setVoicePhase("idle");
-    setSidebarOpen(false);
-    setTimeout(() => startListening(), 100);
-  }, [voiceMode, stopVoiceMode, startListening, voiceSupported]);
 
   // Load threads on mount
   useEffect(() => {
@@ -592,19 +305,13 @@ export default function App() {
     if (tid === threadId) { setThreadId(uuid()); setMessages([]); }
   }, [threadId]);
 
-  const sendMessage = useCallback(async (text, { fromVoice = false, isInterrupt = false } = {}) => {
-    if (!text.trim()) return;
-    if (streaming && !isInterrupt) return;
-    if (!fromVoice) setInput("");
-
-    const turnId = voiceTurnRef.current + 1;
-    voiceTurnRef.current = turnId;
-
-    const abortCtrl = new AbortController();
-    chatAbortRef.current = abortCtrl;
+  const send = useCallback(async (text) => {
+    if (!text.trim() || streaming) return;
+    setInput("");
 
     if (!threads.includes(threadId)) setThreads(p => [...p, threadId]);
 
+    // ✅ FIX: Append user message both to display state AND local thread store
     const userMsg = { role: "user", content: text };
     setMessages(p => {
       const updated = [...p, userMsg];
@@ -612,6 +319,7 @@ export default function App() {
       return updated;
     });
 
+    // Auto-title on first message
     const isFirst = messages.filter(m => m.role === "user").length === 0;
     if (isFirst) {
       text.length >= 15
@@ -619,104 +327,36 @@ export default function App() {
         : setTitles(p => ({ ...p, [threadId]: "New Conversation" }));
     }
 
-    setStreaming(true);
-    if (fromVoice) {
-      setVoicePhase("thinking");
-      startInterruptWatch();
-    }
-    streamRef.current = "";
-    setStreamMsg("");
-
-    const speechQ = speechQueueRef.current;
-    if (fromVoice) speechQ.reset();
-
-    let spokenUpTo = 0;
-    let voiceRestart = false;
-    let full = "";
+    setStreaming(true); streamRef.current = ""; setStreamMsg("");
 
     try {
-      full = await api.streamChat(
-        threadId,
-        text,
-        token => {
-          if (turnId !== voiceTurnRef.current) return;
-          streamRef.current += token;
-          setStreamMsg(streamRef.current);
-
-          if (fromVoice) {
-            const { sentences, newSpokenUpTo } = extractNewSentences(streamRef.current, spokenUpTo);
-            spokenUpTo = newSpokenUpTo;
-            sentences.forEach(s => {
-              setVoicePhase("speaking");
-              startInterruptWatch();
-              speechQ.enqueue(s);
-            });
-          }
-        },
-        abortCtrl.signal,
-        status => {
-          if (turnId !== voiceTurnRef.current || !fromVoice) return;
-          if (status === "using_tools") {
-            setVoicePhase("using_tools");
-            startInterruptWatch();
-          }
-        }
-      );
-
-      if (turnId !== voiceTurnRef.current) return;
+      const full = await api.streamChat(threadId, text, token => {
+        streamRef.current += token;
+        setStreamMsg(streamRef.current);
+      });
 
       if (full) {
+        // ✅ FIX: Append assistant message both to display state AND local thread store
         const assistantMsg = { role: "assistant", content: full };
         setMessages(p => {
           const updated = [...p, assistantMsg];
           setThreadMessages(prev => ({ ...prev, [threadId]: updated }));
           return updated;
         });
-        if (fromVoice) {
-          const remainder = full.slice(spokenUpTo).trim();
-          setVoicePhase("speaking");
-          startInterruptWatch();
-          if (remainder) await speechQ.enqueue(remainder);
-          await speechQ.flushRemainder("");
-          voiceRestart = true;
-        }
-      } else if (fromVoice) {
-        voiceRestart = true;
       }
     } catch (err) {
-      if (turnId !== voiceTurnRef.current || err.name === "AbortError") return;
-
       const errMsg = { role: "assistant", content: `⚠️ **Error:** ${err.message}` };
       setMessages(p => {
         const updated = [...p, errMsg];
         setThreadMessages(prev => ({ ...prev, [threadId]: updated }));
         return updated;
       });
-      if (fromVoice) {
-        setVoicePhase("speaking");
-        await speechQ.speak(`Error: ${err.message}`);
-        voiceRestart = true;
-      }
     } finally {
-      if (turnId === voiceTurnRef.current) {
-        stopInterruptWatch();
-        setStreaming(false);
-        setStreamMsg("");
-        streamRef.current = "";
-        chatAbortRef.current = null;
-      }
+      setStreaming(false); setStreamMsg(""); streamRef.current = "";
     }
+  }, [streaming, messages, threadId, threads]);
 
-    if (voiceRestart && voiceModeRef.current && turnId === voiceTurnRef.current) {
-      restartVoiceListen();
-    }
-  }, [streaming, messages, threadId, threads, restartVoiceListen, interruptCurrentTurn, startInterruptWatch, stopInterruptWatch]);
-
-  sendMessageRef.current = sendMessage;
-
-  const send = useCallback((text) => sendMessage(text, { fromVoice: false }), [sendMessage]);
-
-  const showHero = messages.length === 0 && !streaming && !voiceMode;
+  const showHero = messages.length === 0 && !streaming;
 
   return (
     <div className="app">
@@ -732,15 +372,14 @@ export default function App() {
         onNew={newThread}
         onLoad={tid => { loadThread(tid); setSidebarOpen(false); }}
         onDelete={removeThread}
+        onVoice={t => setInput(t)}
         isOpen={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
       />
 
       <main className="main">
         {showHero
-          ? <Hero onPrompt={send} onVoiceChat={toggleVoiceMode} voiceSupported={voiceSupported} />
-          : voiceMode && messages.length === 0
-          ? <div className="voice-main-empty"><VoicePanel phase={voicePhase} onStop={stopVoiceMode} /></div>
+          ? <Hero onPrompt={send} />
           : <div className="messages">
               {messages.map((m, i) => <Message key={i} role={m.role} content={m.content} />)}
               {streaming && streamMsg  && <Message role="assistant" content={streamMsg} streaming />}
@@ -748,18 +387,7 @@ export default function App() {
               <div ref={bottomRef} />
             </div>
         }
-        <InputBar
-          value={input}
-          onChange={setInput}
-          onSend={send}
-          disabled={streaming}
-          voiceMode={voiceMode}
-          onVoiceToggle={toggleVoiceMode}
-          voiceSupported={voiceSupported}
-        />
-        {voiceMode && messages.length > 0 && (
-          <VoicePanel phase={voicePhase} onStop={stopVoiceMode} compact />
-        )}
+        <InputBar value={input} onChange={setInput} onSend={send} disabled={streaming} />
       </main>
     </div>
   );

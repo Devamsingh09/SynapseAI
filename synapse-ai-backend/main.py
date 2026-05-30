@@ -1,22 +1,13 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File
-from fastapi.responses import StreamingResponse, Response
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage, AIMessage
 import uuid
 import json
 import asyncio
-import os
 
-from chatbot_backend import (
-    chatbot,
-    retrieve_all_threads,
-    delete_thread_data,
-    generate_summary,
-    extract_ai_text,
-    get_latest_assistant_reply,
-)
-from voice_service import transcribe_audio, synthesize_speech, clean_text_for_speech
+from chatbot_backend import chatbot, retrieve_all_threads, delete_thread_data, generate_summary
 
 # ─────────────────────────────────────────────────────────────────────────────
 # APP SETUP
@@ -26,7 +17,7 @@ app = FastAPI(title="Synapse AI API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],   # tighten to your frontend URL in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -41,9 +32,6 @@ class ChatRequest(BaseModel):
     message: str
 
 class SummaryRequest(BaseModel):
-    text: str
-
-class SpeakRequest(BaseModel):
     text: str
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -79,10 +67,8 @@ def get_thread_history(thread_id: str):
         for msg in history:
             if isinstance(msg, HumanMessage):
                 messages.append({"role": "user", "content": msg.content})
-            elif isinstance(msg, AIMessage):
-                text = extract_ai_text(msg.content)
-                if text:
-                    messages.append({"role": "assistant", "content": text})
+            elif isinstance(msg, AIMessage) and msg.content:
+                messages.append({"role": "assistant", "content": msg.content})
 
         user_msgs = [m for m in messages if m["role"] == "user"]
         title = generate_summary(user_msgs[0]["content"]) if user_msgs else "New Conversation"
@@ -111,63 +97,40 @@ def summarize(req: SummaryRequest):
 async def chat_stream(req: ChatRequest):
     """
     Stream the assistant reply token-by-token using Server-Sent Events (SSE).
-    Runs the full LangGraph flow (tools + memory) — same path as text chat.
+    The frontend reads this as a text/event-stream.
     """
     async def event_generator():
-        loop = asyncio.get_event_loop()
-        queue: asyncio.Queue = asyncio.Queue()
-        streamed_text = []
+        try:
+            loop = asyncio.get_event_loop()
 
-        def graph_worker():
-            try:
-                for chunk, metadata in chatbot.stream(
+            # LangGraph's .stream() is synchronous — run it in a thread pool
+            # so it doesn't block the async event loop
+            def run_stream():
+                chunks = []
+                for chunk, _ in chatbot.stream(
                     {"messages": [HumanMessage(content=req.message)]},
                     config={"configurable": {"thread_id": req.thread_id}},
                     stream_mode="messages",
                 ):
-                    loop.call_soon_threadsafe(
-                        queue.put_nowait, ("chunk", chunk, metadata)
-                    )
-                loop.call_soon_threadsafe(queue.put_nowait, ("done", None, None))
-            except Exception as exc:
-                loop.call_soon_threadsafe(queue.put_nowait, ("error", str(exc), None))
+                    if isinstance(chunk, AIMessage) and chunk.content:
+                        chunks.append(chunk.content)
+                return chunks
 
-        worker = loop.run_in_executor(None, graph_worker)
-
-        try:
-            while True:
-                kind, chunk, metadata = await asyncio.wait_for(queue.get(), timeout=120)
-
-                if kind == "done":
-                    break
-                if kind == "error":
-                    yield f"data: {json.dumps({'error': chunk})}\n\n"
-                    return
-
-                node = metadata.get("langgraph_node") if metadata else None
-
-                if node == "tools":
-                    yield f"data: {json.dumps({'status': 'using_tools'})}\n\n"
-                    continue
-
-                if isinstance(chunk, AIMessage) and node == "chat_node":
-                    text = extract_ai_text(chunk.content)
-                    if text:
-                        streamed_text.append(text)
-                        yield f"data: {json.dumps({'token': text})}\n\n"
-
-            await worker
-
-            # Fallback: post-tool replies sometimes arrive as one block; ensure we send them
-            if not streamed_text:
-                final = get_latest_assistant_reply(req.thread_id)
-                if final:
-                    yield f"data: {json.dumps({'token': final})}\n\n"
+            # Stream token by token
+            for chunk, _ in await loop.run_in_executor(
+                None,
+                lambda: list(chatbot.stream(
+                    {"messages": [HumanMessage(content=req.message)]},
+                    config={"configurable": {"thread_id": req.thread_id}},
+                    stream_mode="messages",
+                ))
+            ):
+                if isinstance(chunk, AIMessage) and chunk.content:
+                    data = json.dumps({"token": chunk.content})
+                    yield f"data: {data}\n\n"
+                    await asyncio.sleep(0)   # yield control back to event loop
 
             yield "data: [DONE]\n\n"
-
-        except asyncio.TimeoutError:
-            yield f"data: {json.dumps({'error': 'Request timed out (tools may still be running). Please try again.'})}\n\n"
 
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
@@ -180,62 +143,3 @@ async def chat_stream(req: ChatRequest):
             "X-Accel-Buffering": "no",
         },
     )
-
-
-@app.get("/voice/status")
-def voice_status():
-    """Check whether voice endpoints are configured."""
-    return {
-        "stt": bool(os.getenv("GROQ_API_KEY")),
-        "stt_engine": "groq-whisper-turbo",
-        "stt_model": os.getenv("STT_MODEL", "whisper-large-v3-turbo"),
-        "tts_engine": "browser-primary-edge-fallback",
-        "tts_voice": os.getenv("TTS_VOICE", "en-US-JennyNeural"),
-    }
-
-
-@app.post("/voice/transcribe")
-async def voice_transcribe(audio: UploadFile = File(...)):
-    """Speech-to-text via Groq Whisper. Accepts webm/wav/mp3/ogg."""
-    try:
-        audio_bytes = await audio.read()
-        if not audio_bytes:
-            raise HTTPException(status_code=400, detail="Empty audio file")
-
-        filename = audio.filename or "audio.webm"
-        loop = asyncio.get_event_loop()
-        text = await loop.run_in_executor(
-            None, lambda: transcribe_audio(audio_bytes, filename)
-        )
-
-        if not text:
-            raise HTTPException(status_code=422, detail="Could not transcribe audio")
-
-        return {"text": text}
-
-    except ValueError as e:
-        raise HTTPException(status_code=503, detail=str(e))
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/voice/speak")
-async def voice_speak(req: SpeakRequest):
-    """Text-to-speech via Edge TTS. Returns MP3 audio."""
-    try:
-        cleaned = clean_text_for_speech(req.text)
-        if not cleaned:
-            raise HTTPException(status_code=400, detail="No speakable text")
-
-        audio_bytes = await synthesize_speech(cleaned)
-        if not audio_bytes:
-            raise HTTPException(status_code=500, detail="TTS produced no audio")
-
-        return Response(content=audio_bytes, media_type="audio/mpeg")
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
