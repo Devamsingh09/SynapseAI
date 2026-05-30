@@ -2,9 +2,10 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from typing import TypedDict, Annotated, Literal, Iterator, Tuple
 
-from langchain_core.messages import SystemMessage, HumanMessage, RemoveMessage, AIMessage
+from langchain_core.messages import SystemMessage, HumanMessage, RemoveMessage, AIMessage, AIMessageChunk
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.prebuilt import ToolNode
+from langgraph.config import get_stream_writer
 from dotenv import load_dotenv
 import sqlite3
 import threading
@@ -17,7 +18,8 @@ from langchain_groq import ChatGroq
 llm = ChatGroq(
     model="llama-3.1-8b-instant",
     temperature=0,
-    api_key=os.getenv("GROQ_API_KEY")  # paste directly
+    api_key=os.getenv("GROQ_API_KEY"),
+    streaming=True,
 )
 
 # Summary Model (Fast & Efficient for Memory)
@@ -113,6 +115,22 @@ def extract_ai_text(content) -> str:
     return str(content)
 
 
+def extract_chunk_text(chunk) -> str:
+    """Text delta from a single LLM stream chunk (Groq token / sub-token)."""
+    if chunk is None:
+        return ""
+    if isinstance(chunk, AIMessageChunk):
+        text = extract_ai_text(chunk.content)
+        if text:
+            return text
+        # Skip tool-call chunks (no user-visible text yet)
+        if getattr(chunk, "tool_call_chunks", None) or getattr(chunk, "tool_calls", None):
+            return ""
+    if hasattr(chunk, "content"):
+        return extract_ai_text(chunk.content)
+    return ""
+
+
 _thread_locks: dict[str, threading.Lock] = {}
 _thread_locks_guard = threading.Lock()
 
@@ -132,30 +150,48 @@ def configure_sqlite_connection(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA busy_timeout=30000")
 
 
+def _unpack_stream_event(event) -> Tuple[str, object]:
+    """Normalize LangGraph stream tuples across versions."""
+    if isinstance(event, tuple):
+        if len(event) == 2 and event[0] in ("custom", "messages", "updates", "values"):
+            return event[0], event[1]
+        if len(event) == 3:
+            return event[1], event[2]
+    return "custom", event
+
+
 def iter_chat_stream(message: str, thread_id: str) -> Iterator[Tuple[str, object]]:
     """
     Sync generator of SSE-oriented events: ('token', str), ('status', str), ('done', None), ('error', str).
-    Runs inside a thread-pool worker; one thread_id is serialized via get_thread_lock.
+    Tokens are streamed live from Groq via LangGraph custom stream mode.
     """
     config = {"configurable": {"thread_id": thread_id}}
     lock = get_thread_lock(thread_id)
     with lock:
         try:
-            for chunk, metadata in chatbot.stream(
+            for event in chatbot.stream(
                 {"messages": [HumanMessage(content=message)]},
                 config=config,
-                stream_mode="messages",
+                stream_mode=["custom", "messages"],
             ):
-                node = metadata.get("langgraph_node") if metadata else None
+                mode, payload = _unpack_stream_event(event)
 
-                if node == "tools":
-                    yield ("status", "using_tools")
+                if mode == "custom":
+                    if isinstance(payload, dict):
+                        token = payload.get("token")
+                        if token:
+                            yield ("token", token)
                     continue
 
-                if isinstance(chunk, AIMessage) and node == "chat_node":
-                    text = extract_ai_text(chunk.content)
-                    if text:
-                        yield ("token", text)
+                if mode == "messages":
+                    if isinstance(payload, tuple) and len(payload) == 2:
+                        _msg, metadata = payload
+                    else:
+                        metadata = {}
+
+                    node = metadata.get("langgraph_node") if metadata else None
+                    if node == "tools":
+                        yield ("status", "using_tools")
 
             yield ("done", None)
         except Exception as exc:
@@ -163,7 +199,7 @@ def iter_chat_stream(message: str, thread_id: str) -> Iterator[Tuple[str, object
 
 
 def chat_node(state: ChatState):
-    """Main Chat Node with Long-Term Memory Injection"""
+    """Main Chat Node — streams Groq tokens to the client while building the final AIMessage."""
     summary = state.get("summary", "")
     messages = state["messages"]
 
@@ -174,8 +210,19 @@ def chat_node(state: ChatState):
     system_msg = SystemMessage(content="\n\n".join(system_parts))
     messages = [system_msg] + messages
 
-    response = llm_with_tools.invoke(messages)
-    return {"messages": [response]}
+    writer = get_stream_writer()
+    gathered = None
+
+    for chunk in llm_with_tools.stream(messages):
+        gathered = chunk if gathered is None else gathered + chunk
+        token = extract_chunk_text(chunk)
+        if token:
+            writer({"token": token})
+
+    if gathered is None:
+        gathered = AIMessage(content="")
+
+    return {"messages": [gathered]}
 
 def summarize_conversation(state: ChatState):
     """Compresses old messages into a summary"""
