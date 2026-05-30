@@ -67,8 +67,7 @@ const api = {
 // ═══════════════════════════════════════════════════════
 // SIDEBAR
 // ═══════════════════════════════════════════════════════
-function Sidebar({ threads, titles, threadId, onNew, onLoad, onDelete, onVoiceChat, voiceMode, isOpen, onClose }) {
-  const voiceSupported = isVoiceSupported();
+function Sidebar({ threads, titles, threadId, onNew, onLoad, onDelete, isOpen, onClose }) {
   return (
     <>
       <div className={`overlay ${isOpen ? "open" : ""}`} onClick={onClose} />
@@ -90,18 +89,6 @@ function Sidebar({ threads, titles, threadId, onNew, onLoad, onDelete, onVoiceCh
           </svg>
           New Conversation
         </button>
-
-        {/* Full voice chat — talk to bot with tools + history */}
-        {voiceSupported && (
-          <button className={`btn-voice ${voiceMode ? "rec" : ""}`} onClick={onVoiceChat}>
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-              <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-              <line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
-            </svg>
-            {voiceMode ? "● Voice Chat Active" : "Voice Chat"}
-          </button>
-        )}
 
         {/* History */}
         <nav className="history">
@@ -227,29 +214,30 @@ function InputBar({ value, onChange, onSend, disabled, voiceMode, onVoiceToggle,
           onChange={e => onChange(e.target.value)}
           onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } }}
         />
-        {voiceSupported && (
-          <button
-            type="button"
-            className={`voice-btn ${voiceMode ? "active" : ""}`}
-            onClick={onVoiceToggle}
-            disabled={disabled && !voiceMode}
-            title={voiceMode ? "Exit voice chat" : "Start voice chat — talk to Synapse with tools and history"}
-            aria-label={voiceMode ? "Exit voice chat" : "Start voice chat"}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-              <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-              <line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
-            </svg>
-            <span className="voice-btn-label">{voiceMode ? "Stop" : "Voice"}</span>
+        <div className="input-actions">
+          {voiceSupported && (
+            <button
+              type="button"
+              className={`voice-btn ${voiceMode ? "active" : ""}`}
+              onClick={onVoiceToggle}
+              disabled={disabled && !voiceMode}
+              title={voiceMode ? "Exit voice chat" : "Start voice chat — talk to Synapse with tools and history"}
+              aria-label={voiceMode ? "Exit voice chat" : "Start voice chat"}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                <line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
+              </svg>
+            </button>
+          )}
+          <button className="send-btn" onClick={submit} disabled={disabled || voiceMode || !value.trim()}>
+            {disabled
+              ? <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: "spin 0.9s linear infinite" }}><path d="M21 12a9 9 0 1 1-6.219-8.56" /><style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style></svg>
+              : <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
+            }
           </button>
-        )}
-        <button className="send-btn" onClick={submit} disabled={disabled || voiceMode || !value.trim()}>
-          {disabled
-            ? <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: "spin 0.9s linear infinite" }}><path d="M21 12a9 9 0 1 1-6.219-8.56" /><style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style></svg>
-            : <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
-          }
-        </button>
+        </div>
       </div>
       <p className="input-hint">
         {voiceMode
@@ -563,8 +551,6 @@ export default function App() {
         onNew={newThread}
         onLoad={tid => { loadThread(tid); setSidebarOpen(false); }}
         onDelete={removeThread}
-        onVoiceChat={toggleVoiceMode}
-        voiceMode={voiceMode}
         isOpen={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
       />

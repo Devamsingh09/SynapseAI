@@ -508,8 +508,16 @@ body {
 }
 .input-field::placeholder { color: var(--text-dim); }
 
+.input-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-left: 10px;
+}
+
 .send-btn {
-  width: 36px; height: 36px; flex-shrink: 0; margin-left: 10px;
+  width: 36px; height: 36px; flex-shrink: 0;
   background: linear-gradient(135deg, var(--cyan), var(--cyan-2));
   border: none; border-radius: 10px; color: #000;
   cursor: pointer; display: flex; align-items: center; justify-content: center;
@@ -519,16 +527,12 @@ body {
 .send-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 
 .voice-btn {
-  width: auto; min-width: 36px; height: 36px; flex-shrink: 0; margin-left: 8px;
-  padding: 0 10px;
+  width: 36px; height: 36px; flex-shrink: 0;
   background: var(--bg-card);
   border: 1px solid var(--border-light);
   border-radius: 10px; color: var(--text-muted);
-  cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 6px;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
   transition: all var(--ease);
-}
-.voice-btn-label {
-  font-size: 12px; font-weight: 600; letter-spacing: 0.2px;
 }
 .voice-btn:hover:not(:disabled) {
   border-color: var(--cyan); color: var(--cyan);
@@ -619,7 +623,6 @@ body {
   .sidebar.open { transform: translateX(0); box-shadow: 8px 0 40px rgba(0,0,0,0.6); }
   .hero-cards { grid-template-columns: 1fr; max-width: 380px; }
   .hero-voice-cta { max-width: 100%; }
-  .voice-btn-label { display: none; }
   .msg { padding: 8px 14px; }
   .input-zone { padding: 10px 14px 14px; }
 }
