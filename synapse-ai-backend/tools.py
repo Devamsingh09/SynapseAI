@@ -19,14 +19,15 @@ _vector_store = FAISS.load_local(
 _retriever = _vector_store.as_retriever(search_kwargs={"k": 4})
 
 @tool
-def rag_tool(query: str) -> dict:
-    """Retrieve relevant information from the stored PDF vector index."""
+def rag_tool(query: str) -> str:
+    """Retrieve relevant passages from the stored PDF document index."""
     docs = _retriever.invoke(query)
-    return {
-        "query": query,
-        "context": [d.page_content for d in docs],
-        "metadata": [d.metadata for d in docs],
-    }
+    if not docs:
+        return "No matching document passages found."
+    parts = []
+    for i, d in enumerate(docs, 1):
+        parts.append(f"[{i}] {d.page_content}")
+    return "\n\n".join(parts)
 _search = DuckDuckGoSearchRun()
 
 @tool

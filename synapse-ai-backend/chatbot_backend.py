@@ -17,27 +17,33 @@ from langchain_groq import ChatGroq
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 CHAT_MODEL = os.getenv("GROQ_CHAT_MODEL", "llama-3.3-70b-versatile")
+# Fallback when Groq returns tool_use_failed (common with Llama + tools)
+TOOL_FALLBACK_MODEL = os.getenv("GROQ_TOOL_FALLBACK_MODEL", "qwen/qwen3-32b")
 SUMMARY_MODEL = os.getenv("GROQ_SUMMARY_MODEL", "llama-3.1-8b-instant")
 
-llm = ChatGroq(
-    model=CHAT_MODEL,
-    temperature=0,
-    api_key=GROQ_API_KEY,
-    streaming=True,
-    request_timeout=120,
-)
 
-# Summary / title model — kept smaller for speed and cost
-summary_llm = ChatGroq(
-    model=SUMMARY_MODEL,
-    temperature=0,
-    api_key=GROQ_API_KEY,
-    request_timeout=60,
-)
+def _make_groq(model: str, streaming: bool = True, timeout: int = 120) -> ChatGroq:
+    return ChatGroq(
+        model=model,
+        temperature=0,
+        api_key=GROQ_API_KEY,
+        streaming=streaming,
+        request_timeout=timeout,
+    )
 
-# 2. DEFINE TOOLS 
+
+llm = _make_groq(CHAT_MODEL)
+summary_llm = _make_groq(SUMMARY_MODEL, streaming=False, timeout=60)
+
+# 2. DEFINE TOOLS
 tools = [rag_tool, web_search, calculator, get_stock_price, current_datetime]
-llm_with_tools = llm.bind_tools(tools)
+llm_with_tools = llm.bind_tools(tools, tool_choice="auto")
+
+_tool_fallback_llm = None
+_tool_fallback_with_tools = None
+if TOOL_FALLBACK_MODEL and TOOL_FALLBACK_MODEL != CHAT_MODEL:
+    _tool_fallback_llm = _make_groq(TOOL_FALLBACK_MODEL)
+    _tool_fallback_with_tools = _tool_fallback_llm.bind_tools(tools, tool_choice="auto")
 
 # 3. DEFINE STATE 
 class ChatState(TypedDict):
@@ -120,7 +126,8 @@ Rules for multi-tool use:
 
 ## Tool loop behavior
 If you call a tool, wait for its result, then either call another tool or write your final answer.
-Never leave the user with only a tool call — always finish with a helpful message."""
+Never leave the user with only a tool call — always finish with a helpful message.
+Call ONE tool at a time with valid JSON arguments only (never XML tags or fake function syntax)."""
 
 
 def extract_ai_text(content) -> str:
@@ -226,6 +233,62 @@ def iter_chat_stream(message: str, thread_id: str) -> Iterator[Tuple[str, object
             yield ("error", str(exc))
 
 
+def _is_groq_tool_failure(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "tool_use_failed" in text
+        or "failed to call a function" in text
+        or "failed_generation" in text
+    )
+
+
+def _stream_bound_llm(bound_llm, messages, writer) -> AIMessage:
+    """Stream tokens from Groq; return the assembled AIMessage."""
+    gathered = None
+    for chunk in bound_llm.stream(messages):
+        gathered = chunk if gathered is None else gathered + chunk
+        token = extract_chunk_text(chunk)
+        if token and writer:
+            writer({"token": token})
+    return gathered if gathered is not None else AIMessage(content="")
+
+
+def _invoke_bound_llm(bound_llm, messages, writer) -> AIMessage:
+    """Non-stream invoke fallback; emit full text once to the client."""
+    response = bound_llm.invoke(messages)
+    if writer:
+        text = extract_ai_text(response.content)
+        if text:
+            writer({"token": text})
+    return response
+
+
+def _run_chat_llm(messages, writer) -> AIMessage:
+    """
+    Run the chat model with tool binding.
+    Llama 3.3 70B on Groq often returns tool_use_failed — retry invoke, then fallback model.
+    """
+    candidates = [llm_with_tools]
+    if _tool_fallback_with_tools is not None:
+        candidates.append(_tool_fallback_with_tools)
+
+    last_error = None
+    for bound in candidates:
+        for attempt, runner in enumerate((_stream_bound_llm, _invoke_bound_llm)):
+            try:
+                return runner(bound, messages, writer)
+            except Exception as exc:
+                last_error = exc
+                if not _is_groq_tool_failure(exc):
+                    raise
+                # tool_use_failed: try non-stream on same model, then next model
+                if attempt == 0:
+                    continue
+                break
+
+    raise last_error or RuntimeError("Chat model failed without a specific error.")
+
+
 def chat_node(state: ChatState):
     """Main Chat Node — streams Groq tokens to the client while building the final AIMessage."""
     summary = state.get("summary", "")
@@ -239,17 +302,7 @@ def chat_node(state: ChatState):
     messages = [system_msg] + messages
 
     writer = get_stream_writer()
-    gathered = None
-
-    for chunk in llm_with_tools.stream(messages):
-        gathered = chunk if gathered is None else gathered + chunk
-        token = extract_chunk_text(chunk)
-        if token:
-            writer({"token": token})
-
-    if gathered is None:
-        gathered = AIMessage(content="")
-
+    gathered = _run_chat_llm(messages, writer)
     return {"messages": [gathered]}
 
 def summarize_conversation(state: ChatState):
