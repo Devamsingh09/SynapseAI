@@ -5,8 +5,11 @@ import asyncio
 import edge_tts
 from groq import Groq
 
-TTS_VOICE = os.getenv("TTS_VOICE", "en-US-AriaNeural")
+# Fastest Groq STT model (216x realtime on Groq LPU)
 STT_MODEL = os.getenv("STT_MODEL", "whisper-large-v3-turbo")
+# Edge TTS voice + faster speech rate for backend fallback
+TTS_VOICE = os.getenv("TTS_VOICE", "en-US-JennyNeural")
+TTS_RATE = os.getenv("TTS_RATE", "+12%")
 
 
 def _groq_client() -> Groq:
@@ -33,25 +36,26 @@ def clean_text_for_speech(text: str) -> str:
 
 
 def transcribe_audio(audio_bytes: bytes, filename: str = "audio.webm") -> str:
-    """Transcribe audio with Groq Whisper (fast, uses existing GROQ_API_KEY)."""
+    """Transcribe with Groq Whisper Turbo — fastest cloud STT fallback."""
     client = _groq_client()
     result = client.audio.transcriptions.create(
         file=(filename, audio_bytes),
         model=STT_MODEL,
         response_format="text",
         language="en",
+        temperature=0,
     )
     text = result if isinstance(result, str) else getattr(result, "text", str(result))
     return text.strip()
 
 
 async def synthesize_speech(text: str) -> bytes:
-    """Generate MP3 audio with Edge TTS (free, no extra API key)."""
+    """Edge TTS fallback — used only when browser TTS unavailable."""
     cleaned = clean_text_for_speech(text)
     if not cleaned:
         return b""
 
-    communicate = edge_tts.Communicate(cleaned, TTS_VOICE)
+    communicate = edge_tts.Communicate(cleaned, TTS_VOICE, rate=TTS_RATE)
     audio = b""
     async for chunk in communicate.stream():
         if chunk["type"] == "audio":

@@ -6,6 +6,7 @@ import { v4 as uuid } from "uuid";
 import {
   VoiceRecorder,
   BrowserSpeechListener,
+  InterruptWatcher,
   SpeechQueue,
   extractNewSentences,
   transcribeWithFallback,
@@ -38,17 +39,19 @@ const api = {
     body: JSON.stringify({ text: txt })
   }).then(r => r.json()).then(d => d.title || "New Conversation"),
 
-  async streamChat(threadId, message, onToken) {
+  async streamChat(threadId, message, onToken, signal) {
     const res = await fetch(`${BASE}/chat/stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ thread_id: threadId, message }),
+      signal,
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let full = "", buffer = "";
     while (true) {
+      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
@@ -61,7 +64,10 @@ const api = {
           const obj = JSON.parse(payload);
           if (obj.error) throw new Error(obj.error);
           if (obj.token) { full += obj.token; onToken(obj.token); }
-        } catch (_) {}
+        } catch (e) {
+          if (e instanceof SyntaxError) continue;
+          throw e;
+        }
       }
     }
     return full;
@@ -259,14 +265,15 @@ const VOICE_LABELS = {
   transcribing: "Understanding…",
   thinking: "Thinking…",
   speaking: "Speaking…",
+  interrupted: "Interrupted — listening…",
 };
 
-function VoicePanel({ phase, onStop, compact }) {
+function VoicePanel({ phase, onStop, compact, onInterrupt }) {
   return (
     <div className={`voice-panel ${compact ? "voice-panel-compact" : ""}`}>
       <div className={`voice-orb ${phase}`}>
         <span className="voice-orb-core">🎙️</span>
-        {(phase === "listening" || phase === "speaking") && (
+        {(phase === "listening" || phase === "speaking" || phase === "interrupted") && (
           <>
             <span className="voice-ring r1" />
             <span className="voice-ring r2" />
@@ -276,13 +283,19 @@ function VoicePanel({ phase, onStop, compact }) {
       </div>
       <div className="voice-status">{VOICE_LABELS[phase] || phase}</div>
       <p className="voice-sub">
-        {phase === "listening" && "Speak now — pause 2 seconds when done."}
+        {phase === "listening" && "Speak now — pause 2s when done. Talk anytime to interrupt."}
         {phase === "processing" && "Got it — sending in a moment…"}
-        {phase === "thinking" && "Synapse is thinking and may use tools…"}
-        {phase === "speaking" && "Listen to the reply…"}
+        {phase === "thinking" && "Thinking… speak anytime to interrupt."}
+        {phase === "speaking" && "Speaking… say something to interrupt."}
+        {phase === "interrupted" && "What would you like to say?"}
         {phase === "transcribing" && "Processing your speech…"}
       </p>
-      <button type="button" className="voice-stop" onClick={onStop}>Stop Voice Chat</button>
+      <div className="voice-actions">
+        {(phase === "speaking" || phase === "thinking") && onInterrupt && (
+          <button type="button" className="voice-interrupt" onClick={onInterrupt}>Interrupt</button>
+        )}
+        <button type="button" className="voice-stop" onClick={onStop}>Stop Voice Chat</button>
+      </div>
     </div>
   );
 }
@@ -313,6 +326,9 @@ export default function App() {
   const bottomRef = useRef(null);
   const speechQueueRef = useRef(new SpeechQueue());
   const listenerRef = useRef(null);
+  const interruptRef = useRef(null);
+  const chatAbortRef = useRef(null);
+  const voiceTurnRef = useRef(0);
   const voiceModeRef = useRef(false);
   const streamingRef = useRef(false);
   const voiceLoopRef = useRef(false);
@@ -324,25 +340,64 @@ export default function App() {
 
   const stopVoiceMode = useCallback(() => {
     voiceLoopRef.current = false;
+    voiceTurnRef.current += 1;
+    chatAbortRef.current?.abort();
+    chatAbortRef.current = null;
     listenerRef.current?.stop();
     listenerRef.current = null;
-    speechQueueRef.current.stop();
+    interruptRef.current?.stop();
+    interruptRef.current = null;
+    speechQueueRef.current.interrupt();
     setVoiceMode(false);
     setVoicePhase("idle");
   }, []);
+
+  const stopInterruptWatch = useCallback(() => {
+    interruptRef.current?.stop();
+    interruptRef.current = null;
+  }, []);
+
+  const interruptCurrentTurn = useCallback(() => {
+    voiceTurnRef.current += 1;
+    chatAbortRef.current?.abort();
+    chatAbortRef.current = null;
+    speechQueueRef.current.interrupt();
+    stopInterruptWatch();
+    listenerRef.current?.stop();
+    listenerRef.current = null;
+    voiceLoopRef.current = false;
+    setStreaming(false);
+    setStreamMsg("");
+    streamRef.current = "";
+  }, [stopInterruptWatch]);
+
+  const onVoiceInterrupt = useCallback(() => {
+    if (!voiceModeRef.current) return;
+    interruptCurrentTurn();
+    setVoicePhase("interrupted");
+    setTimeout(() => startListeningRef.current?.({ afterInterrupt: true }), 150);
+  }, [interruptCurrentTurn]);
+
+  const startInterruptWatch = useCallback(() => {
+    if (!voiceModeRef.current || interruptRef.current) return;
+    const watcher = new InterruptWatcher({ onInterrupt: onVoiceInterrupt });
+    interruptRef.current = watcher;
+    watcher.start();
+  }, [onVoiceInterrupt]);
 
   const restartVoiceListen = useCallback(async () => {
     if (!voiceModeRef.current) return;
     voiceLoopRef.current = false;
     listenerRef.current?.stop();
     listenerRef.current = null;
+    stopInterruptWatch();
     setVoicePhase("processing");
     await sleep(VOICE_PAUSE_MS);
     if (!voiceModeRef.current || streamingRef.current) return;
     startListeningRef.current?.();
-  }, []);
+  }, [stopInterruptWatch]);
 
-  const handleVoiceTranscript = useCallback(async (text, { skipPause = false } = {}) => {
+  const handleVoiceTranscript = useCallback(async (text, { skipPause = false, isInterrupt = false } = {}) => {
     if (!text?.trim() || !voiceModeRef.current) {
       restartVoiceListen();
       return;
@@ -351,15 +406,20 @@ export default function App() {
     voiceLoopRef.current = false;
     listenerRef.current?.stop();
     listenerRef.current = null;
+    stopInterruptWatch();
 
-    if (!skipPause) {
+    if (isInterrupt || streamingRef.current) {
+      interruptCurrentTurn();
+    }
+
+    if (!skipPause && !isInterrupt) {
       setVoicePhase("processing");
       await sleep(VOICE_PAUSE_MS);
     }
 
     if (!voiceModeRef.current) return;
-    await sendMessageRef.current?.(text.trim(), { fromVoice: true });
-  }, [restartVoiceListen]);
+    await sendMessageRef.current?.(text.trim(), { fromVoice: true, isInterrupt });
+  }, [restartVoiceListen, interruptCurrentTurn, stopInterruptWatch]);
 
   const startRecorderFallback = useCallback(() => {
     if (!voiceModeRef.current || streamingRef.current || voiceLoopRef.current) return;
@@ -414,18 +474,26 @@ export default function App() {
     });
   }, [stopVoiceMode, handleVoiceTranscript, restartVoiceListen]);
 
-  const startListening = useCallback(() => {
-    if (!voiceModeRef.current || streamingRef.current || voiceLoopRef.current) return;
+  const startListening = useCallback(({ afterInterrupt = false } = {}) => {
+    if (!voiceModeRef.current || voiceLoopRef.current) return;
+    if (streamingRef.current && !afterInterrupt) return;
 
     voiceLoopRef.current = true;
-    setVoicePhase("listening");
+    setVoicePhase(afterInterrupt ? "interrupted" : "listening");
+    stopInterruptWatch();
 
     if (hasBrowserSpeechRecognition()) {
       const listener = new BrowserSpeechListener({
+        silenceMs: afterInterrupt ? 1200 : VOICE_PAUSE_MS,
+        onSpeechStart: () => {
+          if (streamingRef.current || speechQueueRef.current.playing) {
+            onVoiceInterrupt();
+          }
+        },
         onResult: (text) => {
           voiceLoopRef.current = false;
           listenerRef.current = null;
-          handleVoiceTranscript(text);
+          handleVoiceTranscript(text, { isInterrupt: afterInterrupt });
         },
         onRestart: () => {
           voiceLoopRef.current = false;
@@ -459,7 +527,7 @@ export default function App() {
 
     voiceLoopRef.current = false;
     startRecorderFallback();
-  }, [stopVoiceMode, handleVoiceTranscript, startRecorderFallback]);
+  }, [stopVoiceMode, handleVoiceTranscript, startRecorderFallback, stopInterruptWatch, onVoiceInterrupt]);
 
   startListeningRef.current = startListening;
 
@@ -526,9 +594,16 @@ export default function App() {
     if (tid === threadId) { setThreadId(uuid()); setMessages([]); }
   }, [threadId]);
 
-  const sendMessage = useCallback(async (text, { fromVoice = false } = {}) => {
-    if (!text.trim() || streaming) return;
+  const sendMessage = useCallback(async (text, { fromVoice = false, isInterrupt = false } = {}) => {
+    if (!text.trim()) return;
+    if (streaming && !isInterrupt) return;
     if (!fromVoice) setInput("");
+
+    const turnId = voiceTurnRef.current + 1;
+    voiceTurnRef.current = turnId;
+
+    const abortCtrl = new AbortController();
+    chatAbortRef.current = abortCtrl;
 
     if (!threads.includes(threadId)) setThreads(p => [...p, threadId]);
 
@@ -547,18 +622,23 @@ export default function App() {
     }
 
     setStreaming(true);
-    if (fromVoice) setVoicePhase("thinking");
+    if (fromVoice) {
+      setVoicePhase("thinking");
+      startInterruptWatch();
+    }
     streamRef.current = "";
     setStreamMsg("");
 
-    let spokenUpTo = 0;
     const speechQ = speechQueueRef.current;
     if (fromVoice) speechQ.reset();
 
+    let spokenUpTo = 0;
     let voiceRestart = false;
+    let full = "";
 
     try {
-      const full = await api.streamChat(threadId, text, token => {
+      full = await api.streamChat(threadId, text, token => {
+        if (turnId !== voiceTurnRef.current) return;
         streamRef.current += token;
         setStreamMsg(streamRef.current);
 
@@ -567,10 +647,13 @@ export default function App() {
           spokenUpTo = newSpokenUpTo;
           sentences.forEach(s => {
             setVoicePhase("speaking");
+            startInterruptWatch();
             speechQ.enqueue(s);
           });
         }
-      });
+      }, abortCtrl.signal);
+
+      if (turnId !== voiceTurnRef.current) return;
 
       if (full) {
         const assistantMsg = { role: "assistant", content: full };
@@ -582,13 +665,17 @@ export default function App() {
         if (fromVoice) {
           const remainder = full.slice(spokenUpTo).trim();
           setVoicePhase("speaking");
-          await speechQ.flushRemainder(remainder);
+          startInterruptWatch();
+          if (remainder) await speechQ.enqueue(remainder);
+          await speechQ.flushRemainder("");
           voiceRestart = true;
         }
       } else if (fromVoice) {
         voiceRestart = true;
       }
     } catch (err) {
+      if (turnId !== voiceTurnRef.current || err.name === "AbortError") return;
+
       const errMsg = { role: "assistant", content: `⚠️ **Error:** ${err.message}` };
       setMessages(p => {
         const updated = [...p, errMsg];
@@ -597,20 +684,23 @@ export default function App() {
       });
       if (fromVoice) {
         setVoicePhase("speaking");
-        await speechQ.enqueue(`Error: ${err.message}`);
-        await speechQ.flushRemainder("");
+        await speechQ.speak(`Error: ${err.message}`);
         voiceRestart = true;
       }
     } finally {
-      setStreaming(false);
-      setStreamMsg("");
-      streamRef.current = "";
+      if (turnId === voiceTurnRef.current) {
+        stopInterruptWatch();
+        setStreaming(false);
+        setStreamMsg("");
+        streamRef.current = "";
+        chatAbortRef.current = null;
+      }
     }
 
-    if (voiceRestart && voiceModeRef.current) {
+    if (voiceRestart && voiceModeRef.current && turnId === voiceTurnRef.current) {
       restartVoiceListen();
     }
-  }, [streaming, messages, threadId, threads, restartVoiceListen]);
+  }, [streaming, messages, threadId, threads, restartVoiceListen, interruptCurrentTurn, startInterruptWatch, stopInterruptWatch]);
 
   sendMessageRef.current = sendMessage;
 
@@ -640,7 +730,7 @@ export default function App() {
         {showHero
           ? <Hero onPrompt={send} onVoiceChat={toggleVoiceMode} voiceSupported={voiceSupported} />
           : voiceMode && messages.length === 0
-          ? <div className="voice-main-empty"><VoicePanel phase={voicePhase} onStop={stopVoiceMode} /></div>
+          ? <div className="voice-main-empty"><VoicePanel phase={voicePhase} onStop={stopVoiceMode} onInterrupt={onVoiceInterrupt} /></div>
           : <div className="messages">
               {messages.map((m, i) => <Message key={i} role={m.role} content={m.content} />)}
               {streaming && streamMsg  && <Message role="assistant" content={streamMsg} streaming />}
@@ -658,7 +748,7 @@ export default function App() {
           voiceSupported={voiceSupported}
         />
         {voiceMode && messages.length > 0 && (
-          <VoicePanel phase={voicePhase} onStop={stopVoiceMode} compact />
+          <VoicePanel phase={voicePhase} onStop={stopVoiceMode} compact onInterrupt={onVoiceInterrupt} />
         )}
       </main>
     </div>

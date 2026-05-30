@@ -157,9 +157,10 @@ def voice_status():
     """Check whether voice endpoints are configured."""
     return {
         "stt": bool(os.getenv("GROQ_API_KEY")),
-        "tts": True,
+        "stt_engine": "groq-whisper-turbo",
         "stt_model": os.getenv("STT_MODEL", "whisper-large-v3-turbo"),
-        "tts_voice": os.getenv("TTS_VOICE", "en-US-AriaNeural"),
+        "tts_engine": "browser-primary-edge-fallback",
+        "tts_voice": os.getenv("TTS_VOICE", "en-US-JennyNeural"),
     }
 
 
