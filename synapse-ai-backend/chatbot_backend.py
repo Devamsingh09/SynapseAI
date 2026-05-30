@@ -15,15 +15,25 @@ load_dotenv(override=True)
 
 from langchain_groq import ChatGroq
 
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+CHAT_MODEL = os.getenv("GROQ_CHAT_MODEL", "llama-3.3-70b-versatile")
+SUMMARY_MODEL = os.getenv("GROQ_SUMMARY_MODEL", "llama-3.1-8b-instant")
+
 llm = ChatGroq(
-    model="llama-3.1-8b-instant",
+    model=CHAT_MODEL,
     temperature=0,
-    api_key=os.getenv("GROQ_API_KEY"),
+    api_key=GROQ_API_KEY,
     streaming=True,
+    request_timeout=120,
 )
 
-# Summary Model (Fast & Efficient for Memory)
-summary_llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0,api_key=os.getenv("GROQ_API_KEY"))
+# Summary / title model — kept smaller for speed and cost
+summary_llm = ChatGroq(
+    model=SUMMARY_MODEL,
+    temperature=0,
+    api_key=GROQ_API_KEY,
+    request_timeout=60,
+)
 
 # 2. DEFINE TOOLS 
 tools = [rag_tool, web_search, calculator, get_stock_price, current_datetime]
