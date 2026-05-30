@@ -4,6 +4,7 @@ from langchain_core.tools import tool
 from langchain_community.tools import DuckDuckGoSearchRun
 import os
 import requests
+import wikipedia
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 
@@ -98,3 +99,44 @@ def current_datetime(tz_name: str = "Asia/Kolkata") -> str:
     """Return current date & time for a given timezone (default: Asia/Kolkata)."""
     tz = pytz.timezone(tz_name)
     return datetime.now(tz).strftime("%A, %d %B %Y, %I:%M:%S %p %Z")
+
+
+
+
+@tool
+def wikipedia_search(query: str) -> dict:
+    """Search Wikipedia and return a summary of the topic."""
+    try:
+        # Auto-suggest handles typos/partial matches
+        results = wikipedia.search(query, results=3)
+        if not results:
+            return {"query": query, "error": "No results found"}
+
+        # Try to get the best match page
+        page = wikipedia.page(results[0], auto_suggest=False)
+
+        return {
+            "query": query,
+            "title": page.title,
+            "summary": wikipedia.summary(results[0], sentences=5, auto_suggest=False),
+            "url": page.url
+        }
+
+    except wikipedia.exceptions.DisambiguationError as e:
+        # Multiple matches — pick the first option
+        try:
+            page = wikipedia.page(e.options[0], auto_suggest=False)
+            return {
+                "query": query,
+                "title": page.title,
+                "summary": wikipedia.summary(e.options[0], sentences=5, auto_suggest=False),
+                "url": page.url
+            }
+        except Exception as ex:
+            return {"query": query, "error": str(ex)}
+
+    except wikipedia.exceptions.PageError:
+        return {"query": query, "error": f"No Wikipedia page found for '{query}'"}
+
+    except Exception as e:
+        return {"query": query, "error": str(e)}

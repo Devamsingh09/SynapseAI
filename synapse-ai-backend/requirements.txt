@@ -18,3 +18,6 @@ httpx
 sse-starlette
 ddgs
 pytz
+wikipedia
+edge-tts
+python-multipart

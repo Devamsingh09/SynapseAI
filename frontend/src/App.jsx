@@ -3,6 +3,13 @@ import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { v4 as uuid } from "uuid";
+import {
+  VoiceRecorder,
+  SpeechQueue,
+  extractNewSentences,
+  transcribeWithFallback,
+  checkVoiceStatus,
+} from "./voiceChat";
 
 // ═══════════════════════════════════════════════════════
 // API
@@ -209,7 +216,7 @@ function Typing() {
 // ═══════════════════════════════════════════════════════
 // INPUT BAR
 // ═══════════════════════════════════════════════════════
-function InputBar({ value, onChange, onSend, disabled }) {
+function InputBar({ value, onChange, onSend, disabled, voiceMode, onVoiceToggle, voiceReady }) {
   const ref = useRef(null);
   useEffect(() => {
     if (ref.current) { ref.current.style.height = "auto"; ref.current.style.height = `${ref.current.scrollHeight}px`; }
@@ -220,18 +227,64 @@ function InputBar({ value, onChange, onSend, disabled }) {
       <div className="input-shell">
         <textarea ref={ref} rows={1} className="input-field"
           placeholder="Message Synapse AI…  (Enter to send, Shift+Enter for newline)"
-          value={value} disabled={disabled}
+          value={value} disabled={disabled || voiceMode}
           onChange={e => onChange(e.target.value)}
           onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } }}
         />
-        <button className="send-btn" onClick={submit} disabled={disabled || !value.trim()}>
+        {voiceReady && (
+          <button
+            type="button"
+            className={`voice-btn ${voiceMode ? "active" : ""}`}
+            onClick={onVoiceToggle}
+            disabled={disabled && !voiceMode}
+            title={voiceMode ? "Exit voice chat" : "Start voice chat"}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+              <line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
+            </svg>
+          </button>
+        )}
+        <button className="send-btn" onClick={submit} disabled={disabled || voiceMode || !value.trim()}>
           {disabled
             ? <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: "spin 0.9s linear infinite" }}><path d="M21 12a9 9 0 1 1-6.219-8.56" /><style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style></svg>
             : <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
           }
         </button>
       </div>
-      <p className="input-hint">Synapse AI runs on the cloud — your conversations are safe with us.</p>
+      <p className="input-hint">
+        {voiceMode
+          ? "Voice chat active — speak naturally, Synapse will listen and reply aloud."
+          : "Synapse AI runs on the cloud — your conversations are safe with us."}
+      </p>
+    </div>
+  );
+}
+
+const VOICE_LABELS = {
+  idle: "Starting…",
+  listening: "Listening…",
+  transcribing: "Understanding…",
+  thinking: "Thinking…",
+  speaking: "Speaking…",
+};
+
+function VoicePanel({ phase, onStop }) {
+  return (
+    <div className="voice-panel">
+      <div className={`voice-orb ${phase}`}>
+        <span className="voice-orb-core">🎙️</span>
+        {(phase === "listening" || phase === "speaking") && (
+          <>
+            <span className="voice-ring r1" />
+            <span className="voice-ring r2" />
+            <span className="voice-ring r3" />
+          </>
+        )}
+      </div>
+      <div className="voice-status">{VOICE_LABELS[phase] || phase}</div>
+      <button type="button" className="voice-stop" onClick={onStop}>Stop Voice Chat</button>
     </div>
   );
 }
@@ -248,6 +301,9 @@ export default function App() {
   const [streamMsg,   setStreamMsg]   = useState("");
   const [input,       setInput]       = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [voiceMode,    setVoiceMode]    = useState(false);
+  const [voicePhase,   setVoicePhase]   = useState("idle");
+  const [voiceReady,   setVoiceReady]   = useState(false);
 
   // ✅ FIX: threadMessages stores the FULL message history per thread
   // locally in the frontend — completely independent from backend state.
@@ -257,6 +313,98 @@ export default function App() {
 
   const streamRef = useRef("");
   const bottomRef = useRef(null);
+  const speechQueueRef = useRef(new SpeechQueue());
+  const recorderRef = useRef(null);
+  const voiceModeRef = useRef(false);
+  const streamingRef = useRef(false);
+  const voiceLoopRef = useRef(false);
+  const sendMessageRef = useRef(null);
+  const startListeningRef = useRef(null);
+
+  useEffect(() => { voiceModeRef.current = voiceMode; }, [voiceMode]);
+  useEffect(() => { streamingRef.current = streaming; }, [streaming]);
+
+  useEffect(() => {
+    checkVoiceStatus().then(s => setVoiceReady(s.stt || s.tts));
+  }, []);
+
+  const stopVoiceMode = useCallback(() => {
+    voiceLoopRef.current = false;
+    recorderRef.current?.stop();
+    recorderRef.current = null;
+    speechQueueRef.current.stop();
+    setVoiceMode(false);
+    setVoicePhase("idle");
+  }, []);
+
+  const startListening = useCallback(() => {
+    if (!voiceModeRef.current || streamingRef.current || voiceLoopRef.current) return;
+
+    voiceLoopRef.current = true;
+    setVoicePhase("listening");
+
+    const recorder = new VoiceRecorder({
+      onSilence: async (blob) => {
+        voiceLoopRef.current = false;
+        if (!voiceModeRef.current || !blob?.size) {
+          if (voiceModeRef.current) startListeningRef.current?.();
+          return;
+        }
+        try {
+          setVoicePhase("transcribing");
+          const text = await transcribeWithFallback(blob);
+          if (!text || !voiceModeRef.current) {
+            if (voiceModeRef.current) startListeningRef.current?.();
+            return;
+          }
+          await sendMessageRef.current?.(text, { fromVoice: true });
+        } catch {
+          if (voiceModeRef.current) {
+            setVoicePhase("listening");
+            startListeningRef.current?.();
+          }
+        }
+      },
+      onMaxDuration: async (blob) => {
+        voiceLoopRef.current = false;
+        if (!voiceModeRef.current || !blob?.size) return;
+        try {
+          setVoicePhase("transcribing");
+          const text = await transcribeWithFallback(blob);
+          if (text && voiceModeRef.current) await sendMessageRef.current?.(text, { fromVoice: true });
+          else if (voiceModeRef.current) startListeningRef.current?.();
+        } catch {
+          if (voiceModeRef.current) startListeningRef.current?.();
+        }
+      },
+      onError: () => {
+        voiceLoopRef.current = false;
+        if (voiceModeRef.current) {
+          alert("Microphone access is required for voice chat.");
+          stopVoiceMode();
+        }
+      },
+    });
+
+    recorderRef.current = recorder;
+    recorder.start().catch(() => {
+      voiceLoopRef.current = false;
+      stopVoiceMode();
+    });
+  }, [stopVoiceMode]);
+
+  startListeningRef.current = startListening;
+
+  const toggleVoiceMode = useCallback(() => {
+    if (voiceMode) {
+      stopVoiceMode();
+      return;
+    }
+    speechQueueRef.current.reset();
+    setVoiceMode(true);
+    setVoicePhase("idle");
+    setTimeout(() => startListening(), 100);
+  }, [voiceMode, stopVoiceMode, startListening]);
 
   // Load threads on mount
   useEffect(() => {
@@ -305,13 +453,12 @@ export default function App() {
     if (tid === threadId) { setThreadId(uuid()); setMessages([]); }
   }, [threadId]);
 
-  const send = useCallback(async (text) => {
+  const sendMessage = useCallback(async (text, { fromVoice = false } = {}) => {
     if (!text.trim() || streaming) return;
-    setInput("");
+    if (!fromVoice) setInput("");
 
     if (!threads.includes(threadId)) setThreads(p => [...p, threadId]);
 
-    // ✅ FIX: Append user message both to display state AND local thread store
     const userMsg = { role: "user", content: text };
     setMessages(p => {
       const updated = [...p, userMsg];
@@ -319,7 +466,6 @@ export default function App() {
       return updated;
     });
 
-    // Auto-title on first message
     const isFirst = messages.filter(m => m.role === "user").length === 0;
     if (isFirst) {
       text.length >= 15
@@ -327,22 +473,48 @@ export default function App() {
         : setTitles(p => ({ ...p, [threadId]: "New Conversation" }));
     }
 
-    setStreaming(true); streamRef.current = ""; setStreamMsg("");
+    setStreaming(true);
+    if (fromVoice) setVoicePhase("thinking");
+    streamRef.current = "";
+    setStreamMsg("");
+
+    let spokenUpTo = 0;
+    const speechQ = speechQueueRef.current;
+    if (fromVoice) speechQ.reset();
 
     try {
       const full = await api.streamChat(threadId, text, token => {
         streamRef.current += token;
         setStreamMsg(streamRef.current);
+
+        if (fromVoice) {
+          const { sentences, newSpokenUpTo } = extractNewSentences(streamRef.current, spokenUpTo);
+          spokenUpTo = newSpokenUpTo;
+          sentences.forEach(s => {
+            setVoicePhase("speaking");
+            speechQ.enqueue(s);
+          });
+        }
       });
 
       if (full) {
-        // ✅ FIX: Append assistant message both to display state AND local thread store
         const assistantMsg = { role: "assistant", content: full };
         setMessages(p => {
           const updated = [...p, assistantMsg];
           setThreadMessages(prev => ({ ...prev, [threadId]: updated }));
           return updated;
         });
+        if (fromVoice) {
+          const remainder = full.slice(spokenUpTo).trim();
+          setVoicePhase("speaking");
+          await speechQ.flushRemainder(remainder);
+          if (voiceModeRef.current) {
+            setVoicePhase("listening");
+            startListeningRef.current?.();
+          }
+        }
+      } else if (fromVoice && voiceModeRef.current) {
+        startListeningRef.current?.();
       }
     } catch (err) {
       const errMsg = { role: "assistant", content: `⚠️ **Error:** ${err.message}` };
@@ -351,10 +523,24 @@ export default function App() {
         setThreadMessages(prev => ({ ...prev, [threadId]: updated }));
         return updated;
       });
+      if (fromVoice) {
+        setVoicePhase("speaking");
+        await speechQ.enqueue(`Error: ${err.message}`);
+        if (voiceModeRef.current) {
+          setVoicePhase("listening");
+          startListeningRef.current?.();
+        }
+      }
     } finally {
-      setStreaming(false); setStreamMsg(""); streamRef.current = "";
+      setStreaming(false);
+      setStreamMsg("");
+      streamRef.current = "";
     }
   }, [streaming, messages, threadId, threads]);
+
+  sendMessageRef.current = sendMessage;
+
+  const send = useCallback((text) => sendMessage(text, { fromVoice: false }), [sendMessage]);
 
   const showHero = messages.length === 0 && !streaming;
 
@@ -387,7 +573,16 @@ export default function App() {
               <div ref={bottomRef} />
             </div>
         }
-        <InputBar value={input} onChange={setInput} onSend={send} disabled={streaming} />
+        <InputBar
+          value={input}
+          onChange={setInput}
+          onSend={send}
+          disabled={streaming}
+          voiceMode={voiceMode}
+          onVoiceToggle={toggleVoiceMode}
+          voiceReady={voiceReady}
+        />
+        {voiceMode && <VoicePanel phase={voicePhase} onStop={stopVoiceMode} />}
       </main>
     </div>
   );

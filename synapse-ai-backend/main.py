@@ -1,13 +1,15 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.responses import StreamingResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage, AIMessage
 import uuid
 import json
 import asyncio
+import os
 
 from chatbot_backend import chatbot, retrieve_all_threads, delete_thread_data, generate_summary
+from voice_service import transcribe_audio, synthesize_speech, clean_text_for_speech
 
 # ─────────────────────────────────────────────────────────────────────────────
 # APP SETUP
@@ -17,7 +19,7 @@ app = FastAPI(title="Synapse AI API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # tighten to your frontend URL in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -32,6 +34,9 @@ class ChatRequest(BaseModel):
     message: str
 
 class SummaryRequest(BaseModel):
+    text: str
+
+class SpeakRequest(BaseModel):
     text: str
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -103,34 +108,36 @@ async def chat_stream(req: ChatRequest):
         try:
             loop = asyncio.get_event_loop()
 
-            # LangGraph's .stream() is synchronous — run it in a thread pool
-            # so it doesn't block the async event loop
-            def run_stream():
-                chunks = []
-                for chunk, _ in chatbot.stream(
-                    {"messages": [HumanMessage(content=req.message)]},
-                    config={"configurable": {"thread_id": req.thread_id}},
-                    stream_mode="messages",
-                ):
-                    if isinstance(chunk, AIMessage) and chunk.content:
-                        chunks.append(chunk.content)
-                return chunks
+            # ✅ FIX: Wrapped in asyncio.wait_for with 60s timeout
+            # Prevents the chat from freezing silently if the LLM or
+            # summarizer hangs (e.g. Groq rate limit, slow network)
+            chunks = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: list(chatbot.stream(
+                        {"messages": [HumanMessage(content=req.message)]},
+                        config={"configurable": {"thread_id": req.thread_id}},
+                        stream_mode="messages",
+                    ))
+                ),
+                timeout=60
+            )
 
-            # Stream token by token
-            for chunk, _ in await loop.run_in_executor(
-                None,
-                lambda: list(chatbot.stream(
-                    {"messages": [HumanMessage(content=req.message)]},
-                    config={"configurable": {"thread_id": req.thread_id}},
-                    stream_mode="messages",
-                ))
-            ):
-                if isinstance(chunk, AIMessage) and chunk.content:
+            for chunk, metadata in chunks:
+                if (
+                    isinstance(chunk, AIMessage)
+                    and chunk.content
+                    and metadata.get("langgraph_node") == "chat_node"
+                ):
                     data = json.dumps({"token": chunk.content})
                     yield f"data: {data}\n\n"
-                    await asyncio.sleep(0)   # yield control back to event loop
+                    await asyncio.sleep(0)
 
             yield "data: [DONE]\n\n"
+
+        except asyncio.TimeoutError:
+            # ✅ FIX: Send a clean error to frontend instead of hanging forever
+            yield f"data: {json.dumps({'error': 'Request timed out. Please try again.'})}\n\n"
 
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
@@ -143,3 +150,61 @@ async def chat_stream(req: ChatRequest):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.get("/voice/status")
+def voice_status():
+    """Check whether voice endpoints are configured."""
+    return {
+        "stt": bool(os.getenv("GROQ_API_KEY")),
+        "tts": True,
+        "stt_model": os.getenv("STT_MODEL", "whisper-large-v3-turbo"),
+        "tts_voice": os.getenv("TTS_VOICE", "en-US-AriaNeural"),
+    }
+
+
+@app.post("/voice/transcribe")
+async def voice_transcribe(audio: UploadFile = File(...)):
+    """Speech-to-text via Groq Whisper. Accepts webm/wav/mp3/ogg."""
+    try:
+        audio_bytes = await audio.read()
+        if not audio_bytes:
+            raise HTTPException(status_code=400, detail="Empty audio file")
+
+        filename = audio.filename or "audio.webm"
+        loop = asyncio.get_event_loop()
+        text = await loop.run_in_executor(
+            None, lambda: transcribe_audio(audio_bytes, filename)
+        )
+
+        if not text:
+            raise HTTPException(status_code=422, detail="Could not transcribe audio")
+
+        return {"text": text}
+
+    except ValueError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/voice/speak")
+async def voice_speak(req: SpeakRequest):
+    """Text-to-speech via Edge TTS. Returns MP3 audio."""
+    try:
+        cleaned = clean_text_for_speech(req.text)
+        if not cleaned:
+            raise HTTPException(status_code=400, detail="No speakable text")
+
+        audio_bytes = await synthesize_speech(cleaned)
+        if not audio_bytes:
+            raise HTTPException(status_code=500, detail="TTS produced no audio")
+
+        return Response(content=audio_bytes, media_type="audio/mpeg")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
