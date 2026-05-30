@@ -5,9 +5,11 @@ import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { v4 as uuid } from "uuid";
 import {
   VoiceRecorder,
+  BrowserSpeechListener,
   SpeechQueue,
   extractNewSentences,
   transcribeWithFallback,
+  hasBrowserSpeechRecognition,
   isVoiceSupported,
 } from "./voiceChat";
 
@@ -271,7 +273,7 @@ function VoicePanel({ phase, onStop, compact }) {
       </div>
       <div className="voice-status">{VOICE_LABELS[phase] || phase}</div>
       <p className="voice-sub">
-        {phase === "listening" && "Ask anything — web search, docs, calculator, and chat history all work."}
+        {phase === "listening" && "Speak now — pause when done. Web search, tools, and history all work."}
         {phase === "thinking" && "Synapse is thinking and may use tools…"}
         {phase === "speaking" && "Listen to the reply…"}
         {phase === "transcribing" && "Processing your speech…"}
@@ -306,7 +308,7 @@ export default function App() {
   const streamRef = useRef("");
   const bottomRef = useRef(null);
   const speechQueueRef = useRef(new SpeechQueue());
-  const recorderRef = useRef(null);
+  const listenerRef = useRef(null);
   const voiceModeRef = useRef(false);
   const streamingRef = useRef(false);
   const voiceLoopRef = useRef(false);
@@ -318,14 +320,22 @@ export default function App() {
 
   const stopVoiceMode = useCallback(() => {
     voiceLoopRef.current = false;
-    recorderRef.current?.stop();
-    recorderRef.current = null;
+    listenerRef.current?.stop();
+    listenerRef.current = null;
     speechQueueRef.current.stop();
     setVoiceMode(false);
     setVoicePhase("idle");
   }, []);
 
-  const startListening = useCallback(() => {
+  const handleVoiceTranscript = useCallback(async (text) => {
+    if (!text?.trim() || !voiceModeRef.current) {
+      if (voiceModeRef.current) startListeningRef.current?.();
+      return;
+    }
+    await sendMessageRef.current?.(text.trim(), { fromVoice: true });
+  }, []);
+
+  const startRecorderFallback = useCallback(() => {
     if (!voiceModeRef.current || streamingRef.current || voiceLoopRef.current) return;
 
     voiceLoopRef.current = true;
@@ -334,23 +344,20 @@ export default function App() {
     const recorder = new VoiceRecorder({
       onSilence: async (blob) => {
         voiceLoopRef.current = false;
-        if (!voiceModeRef.current || !blob?.size) {
+        if (!voiceModeRef.current) return;
+
+        if (!blob?.size || blob.size < 500) {
           if (voiceModeRef.current) startListeningRef.current?.();
           return;
         }
+
         try {
           setVoicePhase("transcribing");
           const text = await transcribeWithFallback(blob);
-          if (!text || !voiceModeRef.current) {
-            if (voiceModeRef.current) startListeningRef.current?.();
-            return;
-          }
-          await sendMessageRef.current?.(text, { fromVoice: true });
+          if (text) await handleVoiceTranscript(text);
+          else if (voiceModeRef.current) startListeningRef.current?.();
         } catch {
-          if (voiceModeRef.current) {
-            setVoicePhase("listening");
-            startListeningRef.current?.();
-          }
+          if (voiceModeRef.current) startListeningRef.current?.();
         }
       },
       onMaxDuration: async (blob) => {
@@ -359,7 +366,7 @@ export default function App() {
         try {
           setVoicePhase("transcribing");
           const text = await transcribeWithFallback(blob);
-          if (text && voiceModeRef.current) await sendMessageRef.current?.(text, { fromVoice: true });
+          if (text) await handleVoiceTranscript(text);
           else if (voiceModeRef.current) startListeningRef.current?.();
         } catch {
           if (voiceModeRef.current) startListeningRef.current?.();
@@ -374,12 +381,59 @@ export default function App() {
       },
     });
 
-    recorderRef.current = recorder;
+    listenerRef.current = recorder;
     recorder.start().catch(() => {
       voiceLoopRef.current = false;
       stopVoiceMode();
     });
-  }, [stopVoiceMode]);
+  }, [stopVoiceMode, handleVoiceTranscript]);
+
+  const startListening = useCallback(() => {
+    if (!voiceModeRef.current || streamingRef.current || voiceLoopRef.current) return;
+
+    voiceLoopRef.current = true;
+    setVoicePhase("listening");
+
+    if (hasBrowserSpeechRecognition()) {
+      const listener = new BrowserSpeechListener({
+        onResult: async (text) => {
+          voiceLoopRef.current = false;
+          listenerRef.current = null;
+          setVoicePhase("transcribing");
+          await handleVoiceTranscript(text);
+        },
+        onRestart: () => {
+          voiceLoopRef.current = false;
+          if (voiceModeRef.current && !streamingRef.current) {
+            setTimeout(() => startListeningRef.current?.(), 300);
+          }
+        },
+        onError: (err) => {
+          voiceLoopRef.current = false;
+          listenerRef.current = null;
+          if (err?.message === "not-allowed") {
+            alert("Microphone access is required for voice chat.");
+            stopVoiceMode();
+            return;
+          }
+          startRecorderFallback();
+        },
+      });
+
+      listenerRef.current = listener;
+      try {
+        listener.start();
+      } catch {
+        voiceLoopRef.current = false;
+        listenerRef.current = null;
+        startRecorderFallback();
+      }
+      return;
+    }
+
+    voiceLoopRef.current = false;
+    startRecorderFallback();
+  }, [stopVoiceMode, handleVoiceTranscript, startRecorderFallback]);
 
   startListeningRef.current = startListening;
 
