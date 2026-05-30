@@ -28,15 +28,30 @@ def rag_tool(query: str) -> dict:
         "metadata": [d.metadata for d in docs],
     }
 _search = DuckDuckGoSearchRun()
+
 @tool
 def web_search(query: str) -> str:
-    """Search the web and return results as text."""
+    """Search the web for up-to-date information. REQUIRED for current office holders (CM, PM, President, etc.), elections, news, and any fact that may have changed since model training. Use after current_datetime for 'who is X now' questions."""
     try:
-        result = _search.run(query)
-        # DuckDuckGoSearchRun usually returns a string, but ensure anyway
-        return str(result)
+        from ddgs import DDGS
+
+        with DDGS() as ddgs:
+            hits = list(ddgs.text(query, max_results=5))
+        if not hits:
+            # Fallback to LangChain wrapper
+            return str(_search.run(query))
+        parts = []
+        for i, h in enumerate(hits, 1):
+            title = h.get("title", "")
+            body = h.get("body", h.get("snippet", ""))
+            href = h.get("href", h.get("link", ""))
+            parts.append(f"{i}. {title}\n{body}\nSource: {href}")
+        return "\n\n".join(parts)
     except Exception as e:
-        return f"Web search failed: {type(e).__name__}: {e}"
+        try:
+            return str(_search.run(query))
+        except Exception as e2:
+            return f"Web search failed: {type(e).__name__}: {e}; fallback: {type(e2).__name__}: {e2}"
 @tool
 def calculator(first_num:float,second_num:float, operation:str) -> dict:
     """Perform basic arithmetic operation on two numbers.

@@ -27,7 +27,7 @@ const api = {
     body: JSON.stringify({ text: txt })
   }).then(r => r.json()).then(d => d.title || "New Conversation"),
 
-  async streamChat(threadId, message, onToken) {
+  async streamChat(threadId, message, onToken, onStatus) {
     const res = await fetch(`${BASE}/chat/stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -49,8 +49,12 @@ const api = {
         try {
           const obj = JSON.parse(payload);
           if (obj.error) throw new Error(obj.error);
+          if (obj.status) { onStatus?.(obj.status); continue; }
           if (obj.token) { full += obj.token; onToken(obj.token); }
-        } catch (_) {}
+        } catch (e) {
+          if (e instanceof SyntaxError) continue;
+          throw e;
+        }
       }
     }
     return full;
@@ -197,11 +201,14 @@ function Message({ role, content, streaming }) {
   );
 }
 
-function Typing() {
+function Typing({ label }) {
   return (
     <div className="msg msg-ai">
       <div className="avatar">🧠</div>
-      <div className="bubble"><div className="dots"><span /><span /><span /></div></div>
+      <div className="bubble">
+        {label && <div className="tool-status-label">{label}</div>}
+        <div className="dots"><span /><span /><span /></div>
+      </div>
     </div>
   );
 }
@@ -246,6 +253,7 @@ export default function App() {
   const [titles,      setTitles]      = useState({});
   const [streaming,   setStreaming]   = useState(false);
   const [streamMsg,   setStreamMsg]   = useState("");
+  const [toolStatus,  setToolStatus]  = useState(null);
   const [input,       setInput]       = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
@@ -327,13 +335,21 @@ export default function App() {
         : setTitles(p => ({ ...p, [threadId]: "New Conversation" }));
     }
 
-    setStreaming(true); streamRef.current = ""; setStreamMsg("");
+    setStreaming(true); streamRef.current = ""; setStreamMsg(""); setToolStatus(null);
 
     try {
-      const full = await api.streamChat(threadId, text, token => {
-        streamRef.current += token;
-        setStreamMsg(streamRef.current);
-      });
+      const full = await api.streamChat(
+        threadId,
+        text,
+        token => {
+          setToolStatus(null);
+          streamRef.current += token;
+          setStreamMsg(streamRef.current);
+        },
+        status => {
+          if (status === "using_tools") setToolStatus("using_tools");
+        }
+      );
 
       if (full) {
         // ✅ FIX: Append assistant message both to display state AND local thread store
@@ -352,7 +368,7 @@ export default function App() {
         return updated;
       });
     } finally {
-      setStreaming(false); setStreamMsg(""); streamRef.current = "";
+      setStreaming(false); setStreamMsg(""); setToolStatus(null); streamRef.current = "";
     }
   }, [streaming, messages, threadId, threads]);
 
@@ -383,7 +399,10 @@ export default function App() {
           : <div className="messages">
               {messages.map((m, i) => <Message key={i} role={m.role} content={m.content} />)}
               {streaming && streamMsg  && <Message role="assistant" content={streamMsg} streaming />}
-              {streaming && !streamMsg && <Typing />}
+              {streaming && !streamMsg && toolStatus === "using_tools" && (
+                <Typing label="Searching the web & using tools…" />
+              )}
+              {streaming && !streamMsg && toolStatus !== "using_tools" && <Typing />}
               <div ref={bottomRef} />
             </div>
         }
