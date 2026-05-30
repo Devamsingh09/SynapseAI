@@ -1,12 +1,13 @@
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
-from typing import TypedDict, Annotated, Literal
+from typing import TypedDict, Annotated, Literal, Iterator, Tuple
 
-from langchain_core.messages import SystemMessage, HumanMessage, RemoveMessage
+from langchain_core.messages import SystemMessage, HumanMessage, RemoveMessage, AIMessage
 from langgraph.checkpoint.sqlite import SqliteSaver
-from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.prebuilt import ToolNode
 from dotenv import load_dotenv
 import sqlite3
+import threading
 from tools import rag_tool, web_search, calculator, get_stock_price, current_datetime
 import os
 load_dotenv(override=True)
@@ -92,6 +93,75 @@ If you call a tool, wait for its result, then either call another tool or write 
 Never leave the user with only a tool call — always finish with a helpful message."""
 
 
+def extract_ai_text(content) -> str:
+    """Normalize AIMessage.content (str or multimodal list) to plain text."""
+    if not content:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+                elif "text" in block:
+                    parts.append(str(block["text"]))
+            elif isinstance(block, str):
+                parts.append(block)
+        return "".join(parts)
+    return str(content)
+
+
+_thread_locks: dict[str, threading.Lock] = {}
+_thread_locks_guard = threading.Lock()
+
+
+def get_thread_lock(thread_id: str) -> threading.Lock:
+    """Serialize checkpoint access per conversation thread (allows parallel different threads)."""
+    with _thread_locks_guard:
+        if thread_id not in _thread_locks:
+            _thread_locks[thread_id] = threading.Lock()
+        return _thread_locks[thread_id]
+
+
+def configure_sqlite_connection(conn: sqlite3.Connection) -> None:
+    """Improve concurrent read/write behaviour under parallel requests."""
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+
+
+def iter_chat_stream(message: str, thread_id: str) -> Iterator[Tuple[str, object]]:
+    """
+    Sync generator of SSE-oriented events: ('token', str), ('status', str), ('done', None), ('error', str).
+    Runs inside a thread-pool worker; one thread_id is serialized via get_thread_lock.
+    """
+    config = {"configurable": {"thread_id": thread_id}}
+    lock = get_thread_lock(thread_id)
+    with lock:
+        try:
+            for chunk, metadata in chatbot.stream(
+                {"messages": [HumanMessage(content=message)]},
+                config=config,
+                stream_mode="messages",
+            ):
+                node = metadata.get("langgraph_node") if metadata else None
+
+                if node == "tools":
+                    yield ("status", "using_tools")
+                    continue
+
+                if isinstance(chunk, AIMessage) and node == "chat_node":
+                    text = extract_ai_text(chunk.content)
+                    if text:
+                        yield ("token", text)
+
+            yield ("done", None)
+        except Exception as exc:
+            yield ("error", str(exc))
+
+
 def chat_node(state: ChatState):
     """Main Chat Node with Long-Term Memory Injection"""
     summary = state.get("summary", "")
@@ -161,8 +231,10 @@ def should_summarize(state: ChatState) -> Literal["summarize_conversation", "too
 
 #  5. GRAPH CONSTRUCTION 
 
-conn = sqlite3.connect('chatbot.db', check_same_thread=False)
+conn = sqlite3.connect("chatbot.db", check_same_thread=False, timeout=30)
+configure_sqlite_connection(conn)
 checkpointer = SqliteSaver(conn=conn)
+checkpointer.setup()
 
 graph = StateGraph(ChatState)
 

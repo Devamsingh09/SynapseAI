@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,17 +9,41 @@ import uuid
 import json
 import asyncio
 
-from chatbot_backend import chatbot, retrieve_all_threads, delete_thread_data, generate_summary
+from chatbot_backend import (
+    chatbot,
+    retrieve_all_threads,
+    delete_thread_data,
+    generate_summary,
+    iter_chat_stream,
+    get_thread_lock,
+)
+from concurrency import (
+    CHAT_STREAM_TIMEOUT_SEC,
+    IO_TIMEOUT_SEC,
+    chat_slot,
+    io_slot,
+    executor,
+    get_concurrency_stats,
+    run_in_pool,
+    shutdown_pool,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # APP SETUP
 # ─────────────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Synapse AI API", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    shutdown_pool()
+
+
+app = FastAPI(title="Synapse AI API", version="1.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # tighten to your frontend URL in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -27,113 +53,163 @@ app.add_middleware(
 # PYDANTIC MODELS
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class ChatRequest(BaseModel):
     thread_id: str
     message: str
 
+
 class SummaryRequest(BaseModel):
     text: str
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ASYNC HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _load_thread_history(thread_id: str) -> dict:
+    state = chatbot.get_state(config={"configurable": {"thread_id": thread_id}})
+    history = state.values.get("messages", [])
+
+    messages = []
+    for msg in history:
+        if isinstance(msg, HumanMessage):
+            messages.append({"role": "user", "content": msg.content})
+        elif isinstance(msg, AIMessage) and msg.content:
+            messages.append({"role": "assistant", "content": msg.content})
+
+    user_msgs = [m for m in messages if m["role"] == "user"]
+    title = generate_summary(user_msgs[0]["content"]) if user_msgs else "New Conversation"
+
+    return {"thread_id": thread_id, "title": title, "messages": messages}
+
+
+def _delete_thread(thread_id: str) -> dict:
+    with get_thread_lock(thread_id):
+        delete_thread_data(thread_id)
+    return {"deleted": thread_id}
+
+
+def _graph_worker(message: str, thread_id: str, loop: asyncio.AbstractEventLoop, queue: asyncio.Queue) -> None:
+    """Runs in thread pool; pushes stream events onto the async queue."""
+    try:
+        for event in iter_chat_stream(message, thread_id):
+            loop.call_soon_threadsafe(queue.put_nowait, event)
+    except Exception as exc:
+        loop.call_soon_threadsafe(queue.put_nowait, ("error", str(exc)))
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ROUTES
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @app.get("/")
-def root():
-    return {"status": "Synapse AI API is running 🧠"}
+async def root():
+    stats = await get_concurrency_stats()
+    return {
+        "status": "Synapse AI API is running 🧠",
+        "async": True,
+        **stats,
+    }
+
+
+@app.get("/health")
+async def health():
+    stats = await get_concurrency_stats()
+    return {"ok": True, **stats}
 
 
 @app.post("/thread/new")
-def new_thread():
+async def new_thread():
     """Create a new thread ID."""
-    tid = str(uuid.uuid4())
-    return {"thread_id": tid}
+    return {"thread_id": str(uuid.uuid4())}
 
 
 @app.get("/threads")
-def get_threads():
+async def get_threads():
     """Return all saved thread IDs."""
-    return {"threads": retrieve_all_threads()}
+    async with io_slot():
+        threads = await run_in_pool(retrieve_all_threads, timeout=IO_TIMEOUT_SEC)
+    return {"threads": threads}
 
 
 @app.get("/thread/{thread_id}/history")
-def get_thread_history(thread_id: str):
+async def get_thread_history(thread_id: str):
     """Load full message history for a thread from LangGraph state."""
     try:
-        state = chatbot.get_state(config={"configurable": {"thread_id": thread_id}})
-        history = state.values.get("messages", [])
-
-        messages = []
-        for msg in history:
-            if isinstance(msg, HumanMessage):
-                messages.append({"role": "user", "content": msg.content})
-            elif isinstance(msg, AIMessage) and msg.content:
-                messages.append({"role": "assistant", "content": msg.content})
-
-        user_msgs = [m for m in messages if m["role"] == "user"]
-        title = generate_summary(user_msgs[0]["content"]) if user_msgs else "New Conversation"
-
-        return {"thread_id": thread_id, "title": title, "messages": messages}
-
+        async with io_slot():
+            return await run_in_pool(_load_thread_history, thread_id, timeout=IO_TIMEOUT_SEC)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="History request timed out")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.delete("/thread/{thread_id}")
-def delete_thread(thread_id: str):
+async def delete_thread(thread_id: str):
     """Delete a thread and its data."""
-    delete_thread_data(thread_id)
-    return {"deleted": thread_id}
+    async with io_slot():
+        return await run_in_pool(_delete_thread, thread_id, timeout=IO_TIMEOUT_SEC)
 
 
 @app.post("/chat/summary")
-def summarize(req: SummaryRequest):
+async def summarize(req: SummaryRequest):
     """Generate a short title from the first user message."""
-    title = generate_summary(req.text)
+    async with io_slot():
+        title = await run_in_pool(generate_summary, req.text, timeout=IO_TIMEOUT_SEC)
     return {"title": title}
 
 
 @app.post("/chat/stream")
 async def chat_stream(req: ChatRequest):
     """
-    Stream the assistant reply token-by-token using Server-Sent Events (SSE).
-    The frontend reads this as a text/event-stream.
+    Stream the assistant reply using SSE.
+    Up to MAX_CONCURRENT_REQUESTS (default 50) streams can run in parallel.
     """
+
     async def event_generator():
-        try:
-            loop = asyncio.get_event_loop()
+        async with chat_slot():
+            loop = asyncio.get_running_loop()
+            queue: asyncio.Queue = asyncio.Queue()
+            worker = loop.run_in_executor(
+                executor,
+                _graph_worker,
+                req.message,
+                req.thread_id,
+                loop,
+                queue,
+            )
 
-            # LangGraph's .stream() is synchronous — run it in a thread pool
-            # so it doesn't block the async event loop
-            def run_stream():
-                chunks = []
-                for chunk, _ in chatbot.stream(
-                    {"messages": [HumanMessage(content=req.message)]},
-                    config={"configurable": {"thread_id": req.thread_id}},
-                    stream_mode="messages",
-                ):
-                    if isinstance(chunk, AIMessage) and chunk.content:
-                        chunks.append(chunk.content)
-                return chunks
+            try:
+                while True:
+                    try:
+                        kind, payload = await asyncio.wait_for(
+                            queue.get(),
+                            timeout=CHAT_STREAM_TIMEOUT_SEC,
+                        )
+                    except asyncio.TimeoutError:
+                        yield f"data: {json.dumps({'error': 'Request timed out. Please try again.'})}\n\n"
+                        break
 
-            # Stream token by token
-            for chunk, _ in await loop.run_in_executor(
-                None,
-                lambda: list(chatbot.stream(
-                    {"messages": [HumanMessage(content=req.message)]},
-                    config={"configurable": {"thread_id": req.thread_id}},
-                    stream_mode="messages",
-                ))
-            ):
-                if isinstance(chunk, AIMessage) and chunk.content:
-                    data = json.dumps({"token": chunk.content})
-                    yield f"data: {data}\n\n"
-                    await asyncio.sleep(0)   # yield control back to event loop
+                    if kind == "done":
+                        yield "data: [DONE]\n\n"
+                        break
 
-            yield "data: [DONE]\n\n"
+                    if kind == "error":
+                        yield f"data: {json.dumps({'error': payload})}\n\n"
+                        break
 
-        except Exception as e:
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                    if kind == "status":
+                        yield f"data: {json.dumps({'status': payload})}\n\n"
+                        continue
+
+                    if kind == "token":
+                        yield f"data: {json.dumps({'token': payload})}\n\n"
+
+            finally:
+                await worker
 
     return StreamingResponse(
         event_generator(),
