@@ -11,6 +11,8 @@ import {
   transcribeWithFallback,
   hasBrowserSpeechRecognition,
   isVoiceSupported,
+  VOICE_PAUSE_MS,
+  sleep,
 } from "./voiceChat";
 
 // ═══════════════════════════════════════════════════════
@@ -253,6 +255,7 @@ function InputBar({ value, onChange, onSend, disabled, voiceMode, onVoiceToggle,
 const VOICE_LABELS = {
   idle: "Starting…",
   listening: "Listening…",
+  processing: "Processing…",
   transcribing: "Understanding…",
   thinking: "Thinking…",
   speaking: "Speaking…",
@@ -273,7 +276,8 @@ function VoicePanel({ phase, onStop, compact }) {
       </div>
       <div className="voice-status">{VOICE_LABELS[phase] || phase}</div>
       <p className="voice-sub">
-        {phase === "listening" && "Speak now — pause when done. Web search, tools, and history all work."}
+        {phase === "listening" && "Speak now — pause 2 seconds when done."}
+        {phase === "processing" && "Got it — sending in a moment…"}
         {phase === "thinking" && "Synapse is thinking and may use tools…"}
         {phase === "speaking" && "Listen to the reply…"}
         {phase === "transcribing" && "Processing your speech…"}
@@ -327,13 +331,35 @@ export default function App() {
     setVoicePhase("idle");
   }, []);
 
-  const handleVoiceTranscript = useCallback(async (text) => {
+  const restartVoiceListen = useCallback(async () => {
+    if (!voiceModeRef.current) return;
+    voiceLoopRef.current = false;
+    listenerRef.current?.stop();
+    listenerRef.current = null;
+    setVoicePhase("processing");
+    await sleep(VOICE_PAUSE_MS);
+    if (!voiceModeRef.current || streamingRef.current) return;
+    startListeningRef.current?.();
+  }, []);
+
+  const handleVoiceTranscript = useCallback(async (text, { skipPause = false } = {}) => {
     if (!text?.trim() || !voiceModeRef.current) {
-      if (voiceModeRef.current) startListeningRef.current?.();
+      restartVoiceListen();
       return;
     }
+
+    voiceLoopRef.current = false;
+    listenerRef.current?.stop();
+    listenerRef.current = null;
+
+    if (!skipPause) {
+      setVoicePhase("processing");
+      await sleep(VOICE_PAUSE_MS);
+    }
+
+    if (!voiceModeRef.current) return;
     await sendMessageRef.current?.(text.trim(), { fromVoice: true });
-  }, []);
+  }, [restartVoiceListen]);
 
   const startRecorderFallback = useCallback(() => {
     if (!voiceModeRef.current || streamingRef.current || voiceLoopRef.current) return;
@@ -347,17 +373,17 @@ export default function App() {
         if (!voiceModeRef.current) return;
 
         if (!blob?.size || blob.size < 500) {
-          if (voiceModeRef.current) startListeningRef.current?.();
+          restartVoiceListen();
           return;
         }
 
         try {
           setVoicePhase("transcribing");
           const text = await transcribeWithFallback(blob);
-          if (text) await handleVoiceTranscript(text);
-          else if (voiceModeRef.current) startListeningRef.current?.();
+          if (text) await handleVoiceTranscript(text, { skipPause: true });
+          else restartVoiceListen();
         } catch {
-          if (voiceModeRef.current) startListeningRef.current?.();
+          restartVoiceListen();
         }
       },
       onMaxDuration: async (blob) => {
@@ -366,10 +392,10 @@ export default function App() {
         try {
           setVoicePhase("transcribing");
           const text = await transcribeWithFallback(blob);
-          if (text) await handleVoiceTranscript(text);
-          else if (voiceModeRef.current) startListeningRef.current?.();
+          if (text) await handleVoiceTranscript(text, { skipPause: true });
+          else restartVoiceListen();
         } catch {
-          if (voiceModeRef.current) startListeningRef.current?.();
+          restartVoiceListen();
         }
       },
       onError: () => {
@@ -386,7 +412,7 @@ export default function App() {
       voiceLoopRef.current = false;
       stopVoiceMode();
     });
-  }, [stopVoiceMode, handleVoiceTranscript]);
+  }, [stopVoiceMode, handleVoiceTranscript, restartVoiceListen]);
 
   const startListening = useCallback(() => {
     if (!voiceModeRef.current || streamingRef.current || voiceLoopRef.current) return;
@@ -396,16 +422,16 @@ export default function App() {
 
     if (hasBrowserSpeechRecognition()) {
       const listener = new BrowserSpeechListener({
-        onResult: async (text) => {
+        onResult: (text) => {
           voiceLoopRef.current = false;
           listenerRef.current = null;
-          setVoicePhase("transcribing");
-          await handleVoiceTranscript(text);
+          handleVoiceTranscript(text);
         },
         onRestart: () => {
           voiceLoopRef.current = false;
+          listenerRef.current = null;
           if (voiceModeRef.current && !streamingRef.current) {
-            setTimeout(() => startListeningRef.current?.(), 300);
+            setTimeout(() => startListeningRef.current?.(), VOICE_PAUSE_MS);
           }
         },
         onError: (err) => {
@@ -529,6 +555,8 @@ export default function App() {
     const speechQ = speechQueueRef.current;
     if (fromVoice) speechQ.reset();
 
+    let voiceRestart = false;
+
     try {
       const full = await api.streamChat(threadId, text, token => {
         streamRef.current += token;
@@ -555,13 +583,10 @@ export default function App() {
           const remainder = full.slice(spokenUpTo).trim();
           setVoicePhase("speaking");
           await speechQ.flushRemainder(remainder);
-          if (voiceModeRef.current) {
-            setVoicePhase("listening");
-            startListeningRef.current?.();
-          }
+          voiceRestart = true;
         }
-      } else if (fromVoice && voiceModeRef.current) {
-        startListeningRef.current?.();
+      } else if (fromVoice) {
+        voiceRestart = true;
       }
     } catch (err) {
       const errMsg = { role: "assistant", content: `⚠️ **Error:** ${err.message}` };
@@ -573,17 +598,19 @@ export default function App() {
       if (fromVoice) {
         setVoicePhase("speaking");
         await speechQ.enqueue(`Error: ${err.message}`);
-        if (voiceModeRef.current) {
-          setVoicePhase("listening");
-          startListeningRef.current?.();
-        }
+        await speechQ.flushRemainder("");
+        voiceRestart = true;
       }
     } finally {
       setStreaming(false);
       setStreamMsg("");
       streamRef.current = "";
     }
-  }, [streaming, messages, threadId, threads]);
+
+    if (voiceRestart && voiceModeRef.current) {
+      restartVoiceListen();
+    }
+  }, [streaming, messages, threadId, threads, restartVoiceListen]);
 
   sendMessageRef.current = sendMessage;
 

@@ -17,6 +17,12 @@ export function hasBrowserSpeechRecognition() {
   );
 }
 
+export const VOICE_PAUSE_MS = 2000;
+
+export function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 const SENTENCE_RE = /[^.!?]+[.!?]+(?:\s|$)|[^.!?]+$/g;
 const MIN_SENTENCE_LEN = 12;
 
@@ -59,9 +65,8 @@ export class SpeechQueue {
     if (t && !this.stopped) {
       this.queue.push(t);
       if (!this.playing) await this._drain();
-    } else if (this.playing) {
-      await this._waitUntilIdle();
     }
+    await this._waitUntilIdle();
   }
 
   _waitUntilIdle() {
@@ -215,7 +220,7 @@ export class BrowserSpeechListener {
 /** Fallback listener — MediaRecorder + silence detection. */
 export class VoiceRecorder {
   constructor({
-    silenceMs = 1200,
+    silenceMs = VOICE_PAUSE_MS,
     maxMs = 30000,
     threshold = 0.008,
     onSilence,
