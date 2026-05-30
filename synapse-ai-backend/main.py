@@ -8,7 +8,14 @@ import json
 import asyncio
 import os
 
-from chatbot_backend import chatbot, retrieve_all_threads, delete_thread_data, generate_summary
+from chatbot_backend import (
+    chatbot,
+    retrieve_all_threads,
+    delete_thread_data,
+    generate_summary,
+    extract_ai_text,
+    get_latest_assistant_reply,
+)
 from voice_service import transcribe_audio, synthesize_speech, clean_text_for_speech
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -72,8 +79,10 @@ def get_thread_history(thread_id: str):
         for msg in history:
             if isinstance(msg, HumanMessage):
                 messages.append({"role": "user", "content": msg.content})
-            elif isinstance(msg, AIMessage) and msg.content:
-                messages.append({"role": "assistant", "content": msg.content})
+            elif isinstance(msg, AIMessage):
+                text = extract_ai_text(msg.content)
+                if text:
+                    messages.append({"role": "assistant", "content": text})
 
         user_msgs = [m for m in messages if m["role"] == "user"]
         title = generate_summary(user_msgs[0]["content"]) if user_msgs else "New Conversation"
@@ -102,42 +111,63 @@ def summarize(req: SummaryRequest):
 async def chat_stream(req: ChatRequest):
     """
     Stream the assistant reply token-by-token using Server-Sent Events (SSE).
-    The frontend reads this as a text/event-stream.
+    Runs the full LangGraph flow (tools + memory) — same path as text chat.
     """
     async def event_generator():
-        try:
-            loop = asyncio.get_event_loop()
+        loop = asyncio.get_event_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+        streamed_text = []
 
-            # ✅ FIX: Wrapped in asyncio.wait_for with 60s timeout
-            # Prevents the chat from freezing silently if the LLM or
-            # summarizer hangs (e.g. Groq rate limit, slow network)
-            chunks = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: list(chatbot.stream(
-                        {"messages": [HumanMessage(content=req.message)]},
-                        config={"configurable": {"thread_id": req.thread_id}},
-                        stream_mode="messages",
-                    ))
-                ),
-                timeout=60
-            )
-
-            for chunk, metadata in chunks:
-                if (
-                    isinstance(chunk, AIMessage)
-                    and chunk.content
-                    and metadata.get("langgraph_node") == "chat_node"
+        def graph_worker():
+            try:
+                for chunk, metadata in chatbot.stream(
+                    {"messages": [HumanMessage(content=req.message)]},
+                    config={"configurable": {"thread_id": req.thread_id}},
+                    stream_mode="messages",
                 ):
-                    data = json.dumps({"token": chunk.content})
-                    yield f"data: {data}\n\n"
-                    await asyncio.sleep(0)
+                    loop.call_soon_threadsafe(
+                        queue.put_nowait, ("chunk", chunk, metadata)
+                    )
+                loop.call_soon_threadsafe(queue.put_nowait, ("done", None, None))
+            except Exception as exc:
+                loop.call_soon_threadsafe(queue.put_nowait, ("error", str(exc), None))
+
+        worker = loop.run_in_executor(None, graph_worker)
+
+        try:
+            while True:
+                kind, chunk, metadata = await asyncio.wait_for(queue.get(), timeout=120)
+
+                if kind == "done":
+                    break
+                if kind == "error":
+                    yield f"data: {json.dumps({'error': chunk})}\n\n"
+                    return
+
+                node = metadata.get("langgraph_node") if metadata else None
+
+                if node == "tools":
+                    yield f"data: {json.dumps({'status': 'using_tools'})}\n\n"
+                    continue
+
+                if isinstance(chunk, AIMessage) and node == "chat_node":
+                    text = extract_ai_text(chunk.content)
+                    if text:
+                        streamed_text.append(text)
+                        yield f"data: {json.dumps({'token': text})}\n\n"
+
+            await worker
+
+            # Fallback: post-tool replies sometimes arrive as one block; ensure we send them
+            if not streamed_text:
+                final = get_latest_assistant_reply(req.thread_id)
+                if final:
+                    yield f"data: {json.dumps({'token': final})}\n\n"
 
             yield "data: [DONE]\n\n"
 
         except asyncio.TimeoutError:
-            # ✅ FIX: Send a clean error to frontend instead of hanging forever
-            yield f"data: {json.dumps({'error': 'Request timed out. Please try again.'})}\n\n"
+            yield f"data: {json.dumps({'error': 'Request timed out (tools may still be running). Please try again.'})}\n\n"
 
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)})}\n\n"

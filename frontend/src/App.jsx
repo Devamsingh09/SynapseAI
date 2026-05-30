@@ -39,7 +39,7 @@ const api = {
     body: JSON.stringify({ text: txt })
   }).then(r => r.json()).then(d => d.title || "New Conversation"),
 
-  async streamChat(threadId, message, onToken, signal) {
+  async streamChat(threadId, message, onToken, signal, onStatus) {
     const res = await fetch(`${BASE}/chat/stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -63,6 +63,7 @@ const api = {
         try {
           const obj = JSON.parse(payload);
           if (obj.error) throw new Error(obj.error);
+          if (obj.status === "using_tools") { onStatus?.("using_tools"); continue; }
           if (obj.token) { full += obj.token; onToken(obj.token); }
         } catch (e) {
           if (e instanceof SyntaxError) continue;
@@ -264,6 +265,7 @@ const VOICE_LABELS = {
   processing: "Processing…",
   transcribing: "Understanding…",
   thinking: "Thinking…",
+  using_tools: "Using tools…",
   speaking: "Speaking…",
   interrupted: "Interrupted — listening…",
 };
@@ -286,6 +288,7 @@ function VoicePanel({ phase, onStop, compact }) {
         {phase === "listening" && "Speak now — pause 2s when done."}
         {phase === "processing" && "Got it — sending in a moment…"}
         {phase === "thinking" && "Thinking… just speak to interrupt."}
+        {phase === "using_tools" && "Searching and running tools… just speak to interrupt."}
         {phase === "speaking" && "Speaking… just speak to interrupt."}
         {phase === "interrupted" && "What would you like to say?"}
         {phase === "transcribing" && "Processing your speech…"}
@@ -632,21 +635,33 @@ export default function App() {
     let full = "";
 
     try {
-      full = await api.streamChat(threadId, text, token => {
-        if (turnId !== voiceTurnRef.current) return;
-        streamRef.current += token;
-        setStreamMsg(streamRef.current);
+      full = await api.streamChat(
+        threadId,
+        text,
+        token => {
+          if (turnId !== voiceTurnRef.current) return;
+          streamRef.current += token;
+          setStreamMsg(streamRef.current);
 
-        if (fromVoice) {
-          const { sentences, newSpokenUpTo } = extractNewSentences(streamRef.current, spokenUpTo);
-          spokenUpTo = newSpokenUpTo;
-          sentences.forEach(s => {
-            setVoicePhase("speaking");
+          if (fromVoice) {
+            const { sentences, newSpokenUpTo } = extractNewSentences(streamRef.current, spokenUpTo);
+            spokenUpTo = newSpokenUpTo;
+            sentences.forEach(s => {
+              setVoicePhase("speaking");
+              startInterruptWatch();
+              speechQ.enqueue(s);
+            });
+          }
+        },
+        abortCtrl.signal,
+        status => {
+          if (turnId !== voiceTurnRef.current || !fromVoice) return;
+          if (status === "using_tools") {
+            setVoicePhase("using_tools");
             startInterruptWatch();
-            speechQ.enqueue(s);
-          });
+          }
         }
-      }, abortCtrl.signal);
+      );
 
       if (turnId !== voiceTurnRef.current) return;
 

@@ -2,7 +2,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from typing import TypedDict, Annotated, Literal
 
-from langchain_core.messages import SystemMessage, HumanMessage, RemoveMessage
+from langchain_core.messages import SystemMessage, HumanMessage, RemoveMessage, AIMessage
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.prebuilt import ToolNode
 from dotenv import load_dotenv
@@ -17,7 +17,7 @@ llm = ChatGroq(
     model="llama-3.1-8b-instant",
     temperature=0,
     api_key=os.getenv("GROQ_API_KEY"),
-    request_timeout=30  # ✅ FIX: prevent silent hang on slow responses
+    request_timeout=60  # allow time for tool calls + follow-up generation
 )
 
 # Summary Model
@@ -39,14 +39,45 @@ class ChatState(TypedDict):
 
 # 4. NODES
 
+TOOL_SYSTEM = (
+    "You are Synapse AI with tools: web_search, wikipedia_search, calculator, "
+    "get_stock_price, current_datetime, and rag_tool for documents. "
+    "Always use the appropriate tool for live data, math, stocks, time, or document questions. "
+    "After receiving tool results, give a clear helpful answer."
+)
+
+
+def extract_ai_text(content) -> str:
+    """Normalize AIMessage.content (str or multimodal list) to plain text."""
+    if not content:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+                elif "text" in block:
+                    parts.append(str(block["text"]))
+            elif isinstance(block, str):
+                parts.append(block)
+        return "".join(parts)
+    return str(content)
+
+
 def chat_node(state: ChatState):
     """Main Chat Node with Long-Term Memory Injection"""
     summary = state.get("summary", "")
     messages = state["messages"]
 
+    system_parts = [TOOL_SYSTEM]
     if summary:
-        system_msg = SystemMessage(content=f"Long-Term Memory (Summary of past events): {summary}")
-        messages = [system_msg] + messages
+        system_parts.append(f"Long-Term Memory (Summary of past events): {summary}")
+
+    system_msg = SystemMessage(content="\n\n".join(system_parts))
+    messages = [system_msg] + messages
 
     response = llm_with_tools.invoke(messages)
     return {"messages": [response]}
@@ -158,6 +189,27 @@ graph.add_edge("tools", "chat_node")
 graph.add_edge("summarize_conversation", END)
 
 chatbot = graph.compile(checkpointer=checkpointer)
+
+
+def get_latest_assistant_reply(thread_id: str) -> str:
+    """Read the final assistant message from graph state (post-tool fallback)."""
+    try:
+        state = chatbot.get_state(config={"configurable": {"thread_id": thread_id}})
+        messages = state.values.get("messages", [])
+        for msg in reversed(messages):
+            if isinstance(msg, AIMessage):
+                text = extract_ai_text(msg.content)
+                tool_calls = getattr(msg, "tool_calls", None) or []
+                if text and not tool_calls:
+                    return text
+        for msg in reversed(messages):
+            if isinstance(msg, AIMessage):
+                text = extract_ai_text(msg.content)
+                if text:
+                    return text
+    except Exception:
+        pass
+    return ""
 
 
 # HELPER FUNCTIONS
