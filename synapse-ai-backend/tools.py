@@ -1,5 +1,6 @@
 import os
 from datetime import datetime
+from typing import Optional
 
 import pytz
 import requests
@@ -30,8 +31,8 @@ def _tavily_client() -> TavilyClient:
 def _http_get(
     url: str,
     timeout: int = 15,
-    headers: dict | None = None,
-    params: dict | None = None,
+    headers: Optional[dict] = None,
+    params: Optional[dict] = None,
 ) -> requests.Response:
     return requests.get(url, timeout=timeout, headers=headers or {}, params=params or {})
 
@@ -196,7 +197,7 @@ def get_weather(location: str) -> str:
         return f"Weather lookup failed: {type(e).__name__}: {e}"
 
 
-def _weather_code_label(code: int | None) -> str:
+def _weather_code_label(code: Optional[int]) -> str:
     if code is None:
         return "unknown"
     labels = {

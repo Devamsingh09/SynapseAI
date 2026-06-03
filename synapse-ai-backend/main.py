@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse, Response
@@ -72,7 +73,7 @@ class SummaryRequest(BaseModel):
 
 class TtsRequest(BaseModel):
     text: str
-    voice: str | None = None
+    voice: Optional[str] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
