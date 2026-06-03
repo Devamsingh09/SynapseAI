@@ -179,12 +179,11 @@ async def delete_thread(thread_id: str):
 
 @app.get("/voice/config")
 async def voice_config():
-    """Voices and capabilities for the voice UI."""
+    """Voice capabilities — STT/TTS run in the browser (Web Speech API)."""
     return {
-        "tts": True,
-        "stt": "browser",  # Web Speech API on the client (free, low latency)
-        "default_voice": "en-US-AriaNeural",
-        "voices": VOICE_OPTIONS,
+        "stt": "browser",
+        "tts": "browser",
+        "note": "Speech synthesis uses the browser voice engine (Chrome/Edge). No server TTS.",
     }
 
 
