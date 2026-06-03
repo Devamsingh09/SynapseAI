@@ -3,11 +3,17 @@ import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { v4 as uuid } from "uuid";
+import {
+  createVoiceSession,
+  extractNewSpeechChunks,
+  isVoiceSupported,
+} from "./voiceChat";
+import { API_BASE } from "./apiConfig";
 
 // ═══════════════════════════════════════════════════════
 // API
 // ═══════════════════════════════════════════════════════
-const BASE = process.env.REACT_APP_API_URL || "http://localhost:8000";
+const BASE = API_BASE;
 
 const api = {
   newThread:    ()    => fetch(`${BASE}/thread/new`, { method: "POST" }).then(r => r.json()).then(d => d.thread_id),
@@ -27,11 +33,13 @@ const api = {
     body: JSON.stringify({ text: txt })
   }).then(r => r.json()).then(d => d.title || "New Conversation"),
 
-  async streamChat(threadId, message, onToken, onStatus) {
+  async streamChat(threadId, message, onToken, onStatus, options = {}) {
+    const { signal, voice = false } = options;
     const res = await fetch(`${BASE}/chat/stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ thread_id: threadId, message }),
+      body: JSON.stringify({ thread_id: threadId, message, voice }),
+      signal,
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const reader = res.body.getReader();
@@ -62,28 +70,9 @@ const api = {
 };
 
 // ═══════════════════════════════════════════════════════
-// VOICE HOOK
-// ═══════════════════════════════════════════════════════
-function useVoice(onResult) {
-  const [rec, setRec] = useState(false);
-  const supported = "SpeechRecognition" in window || "webkitSpeechRecognition" in window;
-  const toggle = useCallback(() => {
-    if (!supported) return alert("Speech recognition not supported in this browser.");
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (rec) { setRec(false); return; }
-    const r = new SR(); r.lang = "en-US"; r.interimResults = false;
-    r.onstart = () => setRec(true); r.onend = () => setRec(false); r.onerror = () => setRec(false);
-    r.onresult = (e) => onResult?.(e.results[0][0].transcript);
-    r.start();
-  }, [rec, supported, onResult]);
-  return { rec, supported, toggle };
-}
-
-// ═══════════════════════════════════════════════════════
 // SIDEBAR
 // ═══════════════════════════════════════════════════════
-function Sidebar({ threads, titles, threadId, onNew, onLoad, onDelete, onVoice, isOpen, onClose }) {
-  const { rec, supported, toggle } = useVoice(onVoice);
+function Sidebar({ threads, titles, threadId, onNew, onLoad, onDelete, isOpen, onClose }) {
   return (
     <>
       <div className={`overlay ${isOpen ? "open" : ""}`} onClick={onClose} />
@@ -105,18 +94,6 @@ function Sidebar({ threads, titles, threadId, onNew, onLoad, onDelete, onVoice, 
           </svg>
           New Conversation
         </button>
-
-        {/* Voice */}
-        {supported && (
-          <button className={`btn-voice ${rec ? "rec" : ""}`} onClick={toggle}>
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-              <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-              <line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
-            </svg>
-            {rec ? "● Stop Recording" : "Voice Input"}
-          </button>
-        )}
 
         {/* History */}
         <nav className="history">
@@ -216,18 +193,53 @@ function Typing({ label }) {
 // ═══════════════════════════════════════════════════════
 // INPUT BAR
 // ═══════════════════════════════════════════════════════
-function InputBar({ value, onChange, onSend, disabled }) {
+function VoiceStatusBar({ voiceMode, listening, speaking, onStop }) {
+  if (!voiceMode) return null;
+  let label = "Voice mode — speak when ready";
+  if (listening) label = "Listening…";
+  else if (speaking) label = "Speaking… tap mic to interrupt";
+  else label = "Stand by — listening again in ~1.2s after reply";
+  return (
+    <div className="voice-status-bar">
+      <span className={`voice-pulse ${listening ? "listen" : speaking ? "speak" : ""}`} />
+      <span className="voice-status-text">{label}</span>
+      <button type="button" className="voice-stop-btn" onClick={onStop}>Stop voice</button>
+    </div>
+  );
+}
+
+function InputBar({
+  value, onChange, onSend, disabled,
+  voiceSupported, voiceMode, listening, speaking,
+  onVoiceToggle,
+}) {
   const ref = useRef(null);
   useEffect(() => {
     if (ref.current) { ref.current.style.height = "auto"; ref.current.style.height = `${ref.current.scrollHeight}px`; }
   }, [value]);
-  const submit = () => { if (value.trim() && !disabled) onSend(value); };
+  const submit = () => { if (value.trim() && !disabled) onSend(value, { fromVoice: false }); };
   return (
     <div className="input-zone">
-      <div className="input-shell">
+      <div className={`input-shell ${voiceMode ? "voice-active" : ""}`}>
+        {voiceSupported && (
+          <button
+            type="button"
+            className={`mic-btn ${voiceMode ? "on" : ""} ${listening ? "listen" : ""} ${speaking ? "speak" : ""}`}
+            onClick={onVoiceToggle}
+            disabled={disabled && !voiceMode}
+            title={voiceMode ? "Exit voice mode" : "Start voice chat (same tools & memory)"}
+            aria-label={voiceMode ? "Exit voice mode" : "Start voice chat"}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+              <line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
+            </svg>
+          </button>
+        )}
         <textarea ref={ref} rows={1} className="input-field"
-          placeholder="Message Synapse AI…  (Enter to send, Shift+Enter for newline)"
-          value={value} disabled={disabled}
+          placeholder={voiceMode ? "Voice mode — speak or type a message…" : "Message Synapse AI…  (Enter to send, Shift+Enter for newline)"}
+          value={value} disabled={disabled && !voiceMode}
           onChange={e => onChange(e.target.value)}
           onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } }}
         />
@@ -256,6 +268,13 @@ export default function App() {
   const [toolStatus,  setToolStatus]  = useState(null);
   const [input,       setInput]       = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [voiceMode,   setVoiceMode]   = useState(false);
+  const [listening,   setListening]   = useState(false);
+  const [speaking,    setSpeaking]    = useState(false);
+  const [voiceError,  setVoiceError]  = useState(null);
+
+  const voiceRef = useRef(null);
+  const voiceSupported = isVoiceSupported();
 
   // ✅ FIX: threadMessages stores the FULL message history per thread
   // locally in the frontend — completely independent from backend state.
@@ -266,25 +285,57 @@ export default function App() {
   const streamRef = useRef("");
   const bottomRef = useRef(null);
 
-  // Load threads on mount
+  // Load threads on mount (retry while backend warms up — embeddings can take 15–30s)
   useEffect(() => {
-    api.getThreads().then(ids => {
-      setThreads(ids);
-      ids.forEach(tid =>
-        api.getHistory(tid).then(h => {
-          setTitles(p => ({ ...p, [tid]: h.title || "New Conversation" }));
-          // ✅ Only populate threadMessages if we don't already have it locally
-          setThreadMessages(p => {
-            if (p[tid]) return p; // already have local copy, don't overwrite
-            return { ...p, [tid]: h.messages || [] };
-          });
+    let cancelled = false;
+    let retryTimer = null;
+
+    const loadThreads = (attempt = 0) => {
+      api.getThreads()
+        .then(ids => {
+          if (cancelled) return;
+          setThreads(ids);
+          ids.forEach(tid =>
+            api.getHistory(tid).then(h => {
+              if (cancelled) return;
+              setTitles(p => ({ ...p, [tid]: h.title || "New Conversation" }));
+              setThreadMessages(p => {
+                if (p[tid]) return p;
+                return { ...p, [tid]: h.messages || [] };
+              });
+            }).catch(() => { /* history optional on startup */ })
+          );
         })
-      );
-    });
+        .catch(() => {
+          if (cancelled || attempt >= 12) return;
+          retryTimer = setTimeout(() => loadThreads(attempt + 1), 2000);
+        });
+    };
+
+    loadThreads();
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+    };
   }, []);
 
   // Auto-scroll
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, streamMsg]);
+
+  useEffect(() => {
+    voiceRef.current = createVoiceSession({
+      onTranscript: (text) => {
+        setInput(text);
+        sendRef.current?.(text, { fromVoice: true });
+      },
+      onListeningChange: setListening,
+      onSpeakingChange: setSpeaking,
+      onError: (msg) => setVoiceError(msg),
+    });
+    return () => voiceRef.current?.exitVoiceMode();
+  }, []);
+
+  const sendRef = useRef(null);
 
   const loadThread = useCallback((tid) => {
     // ✅ FIX: Never re-fetch from backend when switching threads.
@@ -313,9 +364,15 @@ export default function App() {
     if (tid === threadId) { setThreadId(uuid()); setMessages([]); }
   }, [threadId]);
 
-  const send = useCallback(async (text) => {
+  const send = useCallback(async (text, options = {}) => {
+    const { fromVoice = false } = options;
     if (!text.trim() || streaming) return;
+
+    voiceRef.current?.interrupt();
+    const signal = fromVoice ? voiceRef.current?.newAbortSignal() : undefined;
+
     setInput("");
+    setVoiceError(null);
 
     if (!threads.includes(threadId)) setThreads(p => [...p, threadId]);
 
@@ -337,6 +394,9 @@ export default function App() {
 
     setStreaming(true); streamRef.current = ""; setStreamMsg(""); setToolStatus(null);
 
+    let spokenUpTo = 0;
+    const ttsBufferRef = { current: "" };
+
     try {
       const full = await api.streamChat(
         threadId,
@@ -345,11 +405,30 @@ export default function App() {
           setToolStatus(null);
           streamRef.current += token;
           setStreamMsg(streamRef.current);
+
+          if (fromVoice && voiceRef.current) {
+            ttsBufferRef.current += token;
+            const { chunks, newSpokenUpTo } = extractNewSpeechChunks(
+              ttsBufferRef.current,
+              spokenUpTo
+            );
+            spokenUpTo = newSpokenUpTo;
+            for (const s of chunks) voiceRef.current.enqueueSpeech(s);
+          }
         },
         status => {
-          if (status === "using_tools") setToolStatus("using_tools");
-        }
+          if (status === "using_tools") {
+            setToolStatus("using_tools");
+            if (fromVoice) voiceRef.current?.speakStatus("One moment.");
+          }
+        },
+        { signal, voice: fromVoice }
       );
+
+      if (fromVoice && voiceRef.current && full) {
+        const tail = ttsBufferRef.current.slice(spokenUpTo).trim();
+        if (tail.length >= 8) voiceRef.current.enqueueSpeech(tail);
+      }
 
       if (full) {
         // ✅ FIX: Append assistant message both to display state AND local thread store
@@ -361,16 +440,45 @@ export default function App() {
         });
       }
     } catch (err) {
+      if (err.name === "AbortError") return;
       const errMsg = { role: "assistant", content: `⚠️ **Error:** ${err.message}` };
       setMessages(p => {
         const updated = [...p, errMsg];
         setThreadMessages(prev => ({ ...prev, [threadId]: updated }));
         return updated;
       });
+      if (fromVoice) voiceRef.current?.speakStatus("Sorry, something went wrong.");
     } finally {
       setStreaming(false); setStreamMsg(""); setToolStatus(null); streamRef.current = "";
+      if (fromVoice) voiceRef.current?.notifyAssistantTurnComplete();
     }
   }, [streaming, messages, threadId, threads]);
+
+  sendRef.current = send;
+
+  const handleVoiceToggle = useCallback(() => {
+    if (!voiceSupported) {
+      setVoiceError("Use Chrome or Edge for voice chat.");
+      return;
+    }
+    const v = voiceRef.current;
+    if (!v) return;
+    if (v.isVoiceMode()) {
+      v.exitVoiceMode();
+      setVoiceMode(false);
+    } else {
+      v.enterVoiceMode();
+      setVoiceMode(true);
+      setVoiceError(null);
+    }
+  }, [voiceSupported]);
+
+  const handleStopVoice = useCallback(() => {
+    voiceRef.current?.exitVoiceMode();
+    setVoiceMode(false);
+    setListening(false);
+    setSpeaking(false);
+  }, []);
 
   const showHero = messages.length === 0 && !streaming;
 
@@ -388,7 +496,6 @@ export default function App() {
         onNew={newThread}
         onLoad={tid => { loadThread(tid); setSidebarOpen(false); }}
         onDelete={removeThread}
-        onVoice={t => setInput(t)}
         isOpen={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
       />
@@ -403,10 +510,29 @@ export default function App() {
                 <Typing label="Searching the web & using tools…" />
               )}
               {streaming && !streamMsg && toolStatus !== "using_tools" && <Typing />}
+              {voiceError && (
+                <div className="voice-error-banner">{voiceError}</div>
+              )}
               <div ref={bottomRef} />
             </div>
         }
-        <InputBar value={input} onChange={setInput} onSend={send} disabled={streaming} />
+        <VoiceStatusBar
+          voiceMode={voiceMode}
+          listening={listening}
+          speaking={speaking}
+          onStop={handleStopVoice}
+        />
+        <InputBar
+          value={input}
+          onChange={setInput}
+          onSend={send}
+          disabled={streaming}
+          voiceSupported={voiceSupported}
+          voiceMode={voiceMode}
+          listening={listening}
+          speaking={speaking}
+          onVoiceToggle={handleVoiceToggle}
+        />
       </main>
     </div>
   );

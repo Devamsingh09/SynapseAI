@@ -3,19 +3,41 @@ from langgraph.graph.message import add_messages
 from typing import TypedDict, Annotated, Literal, Iterator, Tuple
 
 from langchain_core.messages import SystemMessage, HumanMessage, RemoveMessage, AIMessage, AIMessageChunk
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.prebuilt import ToolNode
 from langgraph.config import get_stream_writer
 from dotenv import load_dotenv
+import json
+import os
+import re
 import sqlite3
 import threading
-from tools import rag_tool, web_search, calculator, get_stock_price, current_datetime
-import os
-load_dotenv(override=True)
+import uuid
+from datetime import datetime
+
+import pytz
+from tools import (
+    rag_tool,
+    web_search,
+    calculator,
+    get_stock_price,
+    current_datetime,
+    get_weather,
+    wikipedia_search,
+    convert_currency,
+    lookup_pincode,
+    fetch_url,
+    github_search,
+    geo_lookup,
+)
+
+_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(_BACKEND_DIR, ".env"), override=True)
 
 from langchain_groq import ChatGroq
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_API_KEY = (os.getenv("GROQ_API_KEY") or "").strip()
 CHAT_MODEL = os.getenv("GROQ_CHAT_MODEL", "llama-3.3-70b-versatile")
 # Fallback when Groq returns tool_use_failed (common with Llama + tools)
 TOOL_FALLBACK_MODEL = os.getenv("GROQ_TOOL_FALLBACK_MODEL", "qwen/qwen3-32b")
@@ -33,17 +55,39 @@ def _make_groq(model: str, streaming: bool = True, timeout: int = 120) -> ChatGr
 
 
 llm = _make_groq(CHAT_MODEL)
+llm_invoke = _make_groq(CHAT_MODEL, streaming=False)
 summary_llm = _make_groq(SUMMARY_MODEL, streaming=False, timeout=60)
 
 # 2. DEFINE TOOLS
-tools = [rag_tool, web_search, calculator, get_stock_price, current_datetime]
-llm_with_tools = llm.bind_tools(tools, tool_choice="auto")
+tools = [
+    rag_tool,
+    get_weather,
+    wikipedia_search,
+    convert_currency,
+    lookup_pincode,
+    fetch_url,
+    github_search,
+    geo_lookup,
+    web_search,
+    calculator,
+    get_stock_price,
+    current_datetime,
+]
+TOOL_NAMES = {t.name for t in tools}
+_bind_kw = {"tool_choice": "auto", "parallel_tool_calls": False}
+llm_with_tools = llm.bind_tools(tools, **_bind_kw)
+llm_with_tools_invoke = llm_invoke.bind_tools(tools, **_bind_kw)
 
 _tool_fallback_llm = None
 _tool_fallback_with_tools = None
+_tool_fallback_invoke = None
 if TOOL_FALLBACK_MODEL and TOOL_FALLBACK_MODEL != CHAT_MODEL:
     _tool_fallback_llm = _make_groq(TOOL_FALLBACK_MODEL)
-    _tool_fallback_with_tools = _tool_fallback_llm.bind_tools(tools, tool_choice="auto")
+    _tool_fallback_invoke = _make_groq(TOOL_FALLBACK_MODEL, streaming=False)
+    _tool_fallback_with_tools = _tool_fallback_llm.bind_tools(tools, **_bind_kw)
+    _tool_fallback_with_tools_invoke = _tool_fallback_invoke.bind_tools(tools, **_bind_kw)
+else:
+    _tool_fallback_with_tools_invoke = None
 
 # 3. DEFINE STATE 
 class ChatState(TypedDict):
@@ -60,74 +104,86 @@ SYSTEM_PROMPT = """You are Synapse AI — a helpful, accurate assistant (a focus
 - If you are unsure, say so. Do not invent live data (prices, news, dates, document quotes).
 - After using tools, always give a final natural-language answer — never stop at raw tool output.
 - For facts from web_search, base your answer on the search results, not on memory alone.
+- A reference date/time for today is provided below — use that year in search queries. Do NOT call current_datetime unless the user explicitly asks for the time or date.
 
 ## Your tools (use when needed)
-You have these tools: web_search, rag_tool, calculator, get_stock_price, current_datetime.
+You have: get_weather, wikipedia_search, convert_currency, lookup_pincode, fetch_url, github_search, geo_lookup, web_search, rag_tool, calculator, get_stock_price, current_datetime.
 
-## MANDATORY tool use (training data may be outdated)
-For the questions below, NEVER answer from memory alone. Always use tools:
+## Specialized tools (prefer these over web_search when they fit)
+- **get_weather** — weather for a city/place (e.g. "weather in Chennai").
+- **wikipedia_search** — encyclopedia facts, history, definitions, biographies (not live news).
+- **convert_currency** — money conversion with live rates (USD, INR, EUR, etc.).
+- **lookup_pincode** — Indian 6-digit pincode → state, district, post offices.
+- **fetch_url** — read text from a URL the user shared.
+- **github_search** — find GitHub repos or users (search_type: repositories or users).
+- **geo_lookup** — IP address → country/city/ISP (optional ip; empty = server public IP).
 
-1. **current_datetime** first when the user asks about "current", "now", "today", "incumbent", or who holds an office.
-2. **web_search** immediately after, using the year from current_datetime in the query.
+## Live / current facts (use web_search — do not rely on memory)
+For anything that may have changed after your training data, call **web_search** directly with a clear query (include the current year from the reference date below).
 
-Always use this two-step flow for:
-- Chief Minister, Prime Minister, President, Governor, Mayor, or any office holder ("who is the CM of…", "who runs…")
-- Election results, who is in power, cabinet, government leadership
-- News, sports scores, company CEOs, or any role that could have changed recently
+Use web_search for:
+- Chief Minister, PM, President, Governor, elections, who is in power
+- News, sports results (e.g. IPL winner), recent events
+- Commodity/market prices without a stock ticker (e.g. silver, gold) — search the web
+- "Latest", "today", "now", "current", "recent"
 
 Example — "Who is the CM of Tamil Nadu?":
-→ current_datetime → web_search("Tamil Nadu Chief Minister 2026 current")
+→ web_search("Tamil Nadu Chief Minister <current year>")
 
 If search results conflict with your memory, **trust the search results**.
 
 ### web_search
-USE when the user asks about:
-- Current events, news, recent facts, or anything that changes over time
-- Office holders, politicians, elections, governments (see MANDATORY section above)
-- People, products, companies, or topics where up-to-date info matters
-- "Latest", "today", "now", "recent", or "what happened" style questions
-DO NOT use for: timeless definitions, pure math concepts, or coding syntax with no live data needed.
+Primary tool for up-to-date information. One focused query per call.
 
 ### get_stock_price
-USE when the user asks for a stock/share price, ticker quote, or market close for a symbol (e.g. AAPL, TSLA, NVDA).
-- Pass the ticker symbol (not the company name) when possible.
-DO NOT use for: crypto unless a clear stock symbol is given, portfolio advice, or predictions.
+USE only for **listed stock tickers** (e.g. AAPL, TSLA, NVDA).
+DO NOT use for commodities (silver, gold) — use web_search instead.
 
 ### calculator
-USE when the user needs explicit arithmetic or numeric computation (add, sub, mul, div).
-- Supported operations: add, sub, mul, div.
-DO NOT use for: pure conceptual math explanations with no numbers to compute.
+USE for explicit arithmetic (add, sub, mul, div).
 
 ### current_datetime
-USE when the user asks what time or date it is, or before web_search for any "current / today / now" factual question.
-- Default timezone is Asia/Kolkata unless they specify another (e.g. America/New_York, UTC).
-- Include the year from this tool in web_search queries about office holders or recent events.
+USE **only** when the user explicitly asks "what time is it" or "what's the date".
+DO NOT call this before web_search or for office-holder / news questions — today's date is already in your system context.
 
 ### rag_tool
-USE when the user asks about content from your uploaded/stored documents (e.g. ethics chapter PDF, course material in the vector index).
-- Good for: "what does the document say about…", quotes, definitions, scenarios from that material.
-DO NOT use for: general web facts or stock prices — use web_search or get_stock_price instead.
+USE for questions about uploaded/stored documents (ethics PDF, course material).
 
-## When to use multiple tools (in sequence)
-You may call one tool, read the result, then call another if the task requires it. Examples:
-- "Who is the CM of Tamil Nadu?" → current_datetime, then web_search.
-- "What's Apple's stock price and today's headlines?" → get_stock_price, then web_search.
-- "What time is it in New York and what's Tesla trading at?" → current_datetime, then get_stock_price.
-- "Search for inflation news and add 5% to 1200" → web_search, then calculator.
+## Tool calling rules (critical)
+- Call **one tool at a time** with the exact registered tool name and separate JSON arguments.
+- Valid: tool name `web_search` with argument `{"query": "Tamil Nadu CM 2026"}`
+- Invalid: combining name and args into one string, XML tags, or markdown code blocks for tools.
+- Never answer live-fact questions from memory when web_search is appropriate.
 
-Rules for multi-tool use:
-1. For office holders and current events, always current_datetime + web_search (mandatory).
-2. One tool at a time per turn when possible; after each result, decide if another tool is still required.
-3. Combine all results into one coherent final reply for the user.
+## When to use multiple tools
+Only chain tools when the user clearly needs two different capabilities. Examples:
+- "Apple stock price and today's AI news" → get_stock_price, then web_search.
+- "Search inflation news and add 5% to 1200" → web_search, then calculator.
 
 ## When NOT to use tools
-- Greetings, thanks, small talk, creative writing, or coding help with no live data.
-- Static concepts: "what is a binary tree?", "explain photosynthesis" (no current facts needed).
+- Greetings, thanks, small talk, creative writing, static explanations (no live data needed).
 
 ## Tool loop behavior
-If you call a tool, wait for its result, then either call another tool or write your final answer.
-Never leave the user with only a tool call — always finish with a helpful message.
-Call ONE tool at a time with valid JSON arguments only (never XML tags or fake function syntax)."""
+After a tool returns, either call another tool if still needed, or write your final answer. Never stop at raw tool output alone."""
+
+VOICE_ADDENDUM = """## Voice mode (user is speaking aloud)
+- **Be brief.** Prefer 1–3 short sentences. Aim for under 60 words unless the user asked for detail.
+- **Write for fast speech.** Use short sentences. End each thought with a full stop. Keep moving — do not pause with long clauses or commas; split into separate sentences instead so the voice can speak quickly after every full stop.
+- Answer the question directly — no long intros ("Sure!", "Great question!", "Let me explain…").
+- Do not over-explain. Skip background the user did not ask for.
+- No markdown, bullet lists, or code blocks unless explicitly requested.
+- Plain spoken English (or match the user's language). Sound natural when read aloud.
+- You still have full tool access — use tools when needed, then give a **short** spoken summary."""
+
+
+def _reference_datetime_context() -> str:
+    """Inject today's date so the model need not call current_datetime for most queries."""
+    now = datetime.now(pytz.timezone("Asia/Kolkata"))
+    return (
+        "Reference date/time (Asia/Kolkata): "
+        f"{now.strftime('%A, %d %B %Y, %I:%M %p %Z')}. "
+        "Use this year when searching for current facts."
+    )
 
 
 def extract_ai_text(content) -> str:
@@ -195,12 +251,15 @@ def _unpack_stream_event(event) -> Tuple[str, object]:
     return "custom", event
 
 
-def iter_chat_stream(message: str, thread_id: str) -> Iterator[Tuple[str, object]]:
+def iter_chat_stream(
+    message: str, thread_id: str, voice: bool = False
+) -> Iterator[Tuple[str, object]]:
     """
     Sync generator of SSE-oriented events: ('token', str), ('status', str), ('done', None), ('error', str).
     Tokens are streamed live from Groq via LangGraph custom stream mode.
+    voice=True adds concise spoken-response instructions (same graph, tools, and thread state).
     """
-    config = {"configurable": {"thread_id": thread_id}}
+    config = {"configurable": {"thread_id": thread_id, "voice_mode": voice}}
     lock = get_thread_lock(thread_id)
     with lock:
         try:
@@ -239,7 +298,89 @@ def _is_groq_tool_failure(exc: Exception) -> bool:
         "tool_use_failed" in text
         or "failed to call a function" in text
         or "failed_generation" in text
+        or "tool call validation failed" in text
+        or "which was not in request.tools" in text
+        or ("invalid_request_error" in text and "tool" in text)
     )
+
+
+def _parse_malformed_tool_name(raw_name: str):
+    """Split Groq/Llama glitches like web_search{\"query\": \"...\"} into name + args."""
+    raw = (raw_name or "").strip()
+    if "{" not in raw:
+        return raw, None
+    tool_name = raw.split("{", 1)[0].strip()
+    args_str = "{" + raw.split("{", 1)[1]
+    try:
+        return tool_name, json.loads(args_str)
+    except json.JSONDecodeError:
+        return tool_name, None
+
+
+def _sanitize_ai_response(msg: AIMessage) -> AIMessage:
+    """
+    Repair malformed tool calls from Groq/Llama before LangGraph runs ToolNode.
+    Fixes names like web_search{\"query\": \"...\"} merged into one string.
+    """
+    tool_calls = list(getattr(msg, "tool_calls", None) or [])
+    if tool_calls:
+        fixed_calls = []
+        changed = False
+        for tc in tool_calls:
+            name = tc.get("name", "")
+            args = tc.get("args") or {}
+            parsed_name, parsed_args = _parse_malformed_tool_name(name)
+            if parsed_name in TOOL_NAMES:
+                new_args = parsed_args if parsed_args else args
+                if parsed_name != name or (parsed_args and parsed_args != args):
+                    changed = True
+                fixed_calls.append(
+                    {
+                        **tc,
+                        "name": parsed_name,
+                        "args": new_args,
+                        "type": tc.get("type") or "tool_call",
+                    }
+                )
+            else:
+                fixed_calls.append(tc)
+        if changed:
+            return AIMessage(
+                content=msg.content or "",
+                tool_calls=fixed_calls,
+                id=getattr(msg, "id", None),
+            )
+        return msg
+
+    text = extract_ai_text(msg.content).strip()
+    if not text:
+        return msg
+
+    inline = re.match(
+        rf"^({'|'.join(re.escape(n) for n in sorted(TOOL_NAMES))})\s*(\{{.*\}})\s*$",
+        text,
+        re.DOTALL,
+    )
+    if inline:
+        name, args = inline.group(1), json.loads(inline.group(2))
+        if name in TOOL_NAMES:
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": name,
+                        "args": args,
+                        "id": f"call_{uuid.uuid4().hex[:8]}",
+                        "type": "tool_call",
+                    }
+                ],
+            )
+    return msg
+
+
+def _emit_text_to_writer(text: str, writer) -> None:
+    if text and writer:
+        writer({"token": text})
 
 
 def _stream_bound_llm(bound_llm, messages, writer) -> AIMessage:
@@ -250,51 +391,60 @@ def _stream_bound_llm(bound_llm, messages, writer) -> AIMessage:
         token = extract_chunk_text(chunk)
         if token and writer:
             writer({"token": token})
-    return gathered if gathered is not None else AIMessage(content="")
+    result = gathered if gathered is not None else AIMessage(content="")
+    return _sanitize_ai_response(result)
 
 
 def _invoke_bound_llm(bound_llm, messages, writer) -> AIMessage:
-    """Non-stream invoke fallback; emit full text once to the client."""
-    response = bound_llm.invoke(messages)
-    if writer:
-        text = extract_ai_text(response.content)
-        if text:
-            writer({"token": text})
+    """Non-stream invoke — more reliable for tool calls on Groq Llama."""
+    response = _sanitize_ai_response(bound_llm.invoke(messages))
+    if not (getattr(response, "tool_calls", None) or []):
+        _emit_text_to_writer(extract_ai_text(response.content), writer)
     return response
 
 
-def _run_chat_llm(messages, writer) -> AIMessage:
+def _run_chat_llm(messages, writer, *, prefer_stream: bool = False) -> AIMessage:
     """
-    Run the chat model with tool binding.
-    Llama 3.3 70B on Groq often returns tool_use_failed — retry invoke, then fallback model.
+    Run chat with tools. Text chat: invoke-first (reliable tool JSON on Groq Llama).
+    Voice mode: stream-first so tokens reach TTS sooner.
     """
-    candidates = [llm_with_tools]
-    if _tool_fallback_with_tools is not None:
-        candidates.append(_tool_fallback_with_tools)
+    candidates = [
+        (llm_with_tools_invoke, llm_with_tools),
+        (_tool_fallback_with_tools_invoke, _tool_fallback_with_tools),
+    ]
+
+    if prefer_stream:
+        runner_order = (_stream_bound_llm, _invoke_bound_llm)
+    else:
+        runner_order = (_invoke_bound_llm, _stream_bound_llm)
 
     last_error = None
-    for bound in candidates:
-        for attempt, runner in enumerate((_stream_bound_llm, _invoke_bound_llm)):
+    for invoke_llm, stream_llm in candidates:
+        if invoke_llm is None or stream_llm is None:
+            continue
+        for runner, bound in (
+            (runner_order[0], stream_llm if runner_order[0] is _stream_bound_llm else invoke_llm),
+            (runner_order[1], stream_llm if runner_order[1] is _stream_bound_llm else invoke_llm),
+        ):
             try:
                 return runner(bound, messages, writer)
             except Exception as exc:
                 last_error = exc
                 if not _is_groq_tool_failure(exc):
                     raise
-                # tool_use_failed: try non-stream on same model, then next model
-                if attempt == 0:
-                    continue
-                break
 
     raise last_error or RuntimeError("Chat model failed without a specific error.")
 
 
-def chat_node(state: ChatState):
+def chat_node(state: ChatState, config: RunnableConfig):
     """Main Chat Node — streams Groq tokens to the client while building the final AIMessage."""
     summary = state.get("summary", "")
     messages = state["messages"]
 
-    system_parts = [SYSTEM_PROMPT]
+    voice_mode = bool((config or {}).get("configurable", {}).get("voice_mode", False))
+    system_parts = [SYSTEM_PROMPT, _reference_datetime_context()]
+    if voice_mode:
+        system_parts.append(VOICE_ADDENDUM)
     if summary:
         system_parts.append(f"Long-Term Memory (Summary of past events):\n{summary}")
 
@@ -302,7 +452,7 @@ def chat_node(state: ChatState):
     messages = [system_msg] + messages
 
     writer = get_stream_writer()
-    gathered = _run_chat_llm(messages, writer)
+    gathered = _run_chat_llm(messages, writer, prefer_stream=voice_mode)
     return {"messages": [gathered]}
 
 def summarize_conversation(state: ChatState):

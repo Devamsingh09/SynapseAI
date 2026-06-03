@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage, AIMessage
@@ -16,7 +16,9 @@ from chatbot_backend import (
     generate_summary,
     iter_chat_stream,
     get_thread_lock,
+    GROQ_API_KEY,
 )
+from voice_service import VOICE_OPTIONS, synthesize_speech
 from concurrency import (
     CHAT_STREAM_TIMEOUT_SEC,
     IO_TIMEOUT_SEC,
@@ -35,6 +37,10 @@ from concurrency import (
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if not GROQ_API_KEY:
+        print("WARNING: GROQ_API_KEY is missing — set it in synapse-ai-backend/.env")
+    elif not GROQ_API_KEY.startswith("gsk_"):
+        print("WARNING: GROQ_API_KEY format looks wrong — copy a fresh key from console.groq.com")
     yield
     shutdown_pool()
 
@@ -57,10 +63,16 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     thread_id: str
     message: str
+    voice: bool = False
 
 
 class SummaryRequest(BaseModel):
     text: str
+
+
+class TtsRequest(BaseModel):
+    text: str
+    voice: str | None = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -91,10 +103,16 @@ def _delete_thread(thread_id: str) -> dict:
     return {"deleted": thread_id}
 
 
-def _graph_worker(message: str, thread_id: str, loop: asyncio.AbstractEventLoop, queue: asyncio.Queue) -> None:
+def _graph_worker(
+    message: str,
+    thread_id: str,
+    voice: bool,
+    loop: asyncio.AbstractEventLoop,
+    queue: asyncio.Queue,
+) -> None:
     """Runs in thread pool; pushes stream events onto the async queue."""
     try:
-        for event in iter_chat_stream(message, thread_id):
+        for event in iter_chat_stream(message, thread_id, voice=voice):
             loop.call_soon_threadsafe(queue.put_nowait, event)
     except Exception as exc:
         loop.call_soon_threadsafe(queue.put_nowait, ("error", str(exc)))
@@ -118,7 +136,12 @@ async def root():
 @app.get("/health")
 async def health():
     stats = await get_concurrency_stats()
-    return {"ok": True, **stats}
+    groq_ok = bool(GROQ_API_KEY and GROQ_API_KEY.startswith("gsk_"))
+    return {
+        "ok": groq_ok,
+        "groq_configured": groq_ok,
+        **stats,
+    }
 
 
 @app.post("/thread/new")
@@ -154,6 +177,30 @@ async def delete_thread(thread_id: str):
         return await run_in_pool(_delete_thread, thread_id, timeout=IO_TIMEOUT_SEC)
 
 
+@app.get("/voice/config")
+async def voice_config():
+    """Voices and capabilities for the voice UI."""
+    return {
+        "tts": True,
+        "stt": "browser",  # Web Speech API on the client (free, low latency)
+        "default_voice": "en-US-AriaNeural",
+        "voices": VOICE_OPTIONS,
+    }
+
+
+@app.post("/voice/tts")
+async def voice_tts(req: TtsRequest):
+    """Synthesize speech (MP3) via Edge TTS — free neural voices."""
+    try:
+        audio = await synthesize_speech(req.text, req.voice)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"TTS failed: {e}")
+
+    return Response(content=audio, media_type="audio/mpeg")
+
+
 @app.post("/chat/summary")
 async def summarize(req: SummaryRequest):
     """Generate a short title from the first user message."""
@@ -178,6 +225,7 @@ async def chat_stream(req: ChatRequest):
                 _graph_worker,
                 req.message,
                 req.thread_id,
+                req.voice,
                 loop,
                 queue,
             )

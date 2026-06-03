@@ -490,6 +490,91 @@ body {
 
 .input-hint { text-align:center; font-size:11px; color:var(--text-dim); margin-top:8px; }
 
+/* voice chat */
+.input-shell.voice-active {
+  border-color: rgba(0, 212, 255, 0.55);
+  box-shadow: 0 0 0 2px var(--cyan-dim), 0 8px 30px rgba(0, 212, 255, 0.12);
+}
+
+.mic-btn {
+  width: 36px; height: 36px; flex-shrink: 0; margin-right: 8px;
+  background: transparent; border: 1px solid var(--border-light);
+  border-radius: 10px; color: var(--text-muted);
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  transition: all var(--ease);
+}
+.mic-btn:hover:not(:disabled) { border-color: var(--cyan); color: var(--cyan); }
+.mic-btn.on {
+  background: rgba(0, 212, 255, 0.12);
+  border-color: var(--cyan);
+  color: var(--cyan);
+  box-shadow: 0 0 16px var(--cyan-glow);
+}
+.mic-btn.listen {
+  animation: mic-pulse 1.2s ease-in-out infinite;
+  border-color: #ff6b6b;
+  color: #ff8a8a;
+}
+.mic-btn.speak {
+  border-color: #a78bfa;
+  color: #c4b5fd;
+}
+
+@keyframes mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 107, 107, 0.35); }
+  50% { box-shadow: 0 0 0 8px rgba(255, 107, 107, 0); }
+}
+
+.voice-status-bar {
+  max-width: 800px; margin: 0 auto 8px;
+  padding: 8px 14px;
+  display: flex; align-items: center; gap: 10px;
+  background: rgba(0, 212, 255, 0.06);
+  border: 1px solid rgba(0, 212, 255, 0.25);
+  border-radius: var(--r-lg);
+  font-size: 13px;
+  color: var(--cyan-2);
+}
+
+.voice-pulse {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--cyan-2); opacity: 0.5;
+}
+.voice-pulse.listen, .voice-pulse.speak {
+  opacity: 1;
+  animation: voice-dot 1s ease-in-out infinite;
+}
+.voice-pulse.listen { background: #ff6b6b; }
+.voice-pulse.speak { background: #a78bfa; }
+
+@keyframes voice-dot {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.35); }
+}
+
+.voice-status-text { flex: 1; }
+
+.voice-stop-btn {
+  background: transparent;
+  border: 1px solid var(--border-light);
+  color: var(--text-muted);
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.voice-stop-btn:hover { border-color: var(--cyan); color: var(--cyan); }
+
+.voice-error-banner {
+  margin: 8px 28px;
+  padding: 10px 14px;
+  border-radius: var(--r);
+  background: rgba(255, 80, 80, 0.1);
+  border: 1px solid rgba(255, 100, 100, 0.35);
+  color: #ffb4b4;
+  font-size: 13px;
+}
+
 /* ══════════════════════════════════════════════════════
    RESPONSIVE
 ══════════════════════════════════════════════════════ */
