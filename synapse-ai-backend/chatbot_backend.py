@@ -1,6 +1,6 @@
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
-from typing import TypedDict, Annotated, Literal, Iterator, Tuple
+from typing import TypedDict, Annotated, Literal, Iterator, Tuple, Optional
 
 from langchain_core.messages import SystemMessage, HumanMessage, RemoveMessage, AIMessage, AIMessageChunk
 from langchain_core.runnables import RunnableConfig
@@ -152,8 +152,9 @@ USE for questions about uploaded/stored documents (ethics PDF, course material).
 ## Tool calling rules (critical)
 - Call **one tool at a time** with the exact registered tool name and separate JSON arguments.
 - Valid: tool name `web_search` with argument `{"query": "Tamil Nadu CM 2026"}`
+- **NEVER** write tool calls as text, XML, or tags in your reply (wrong: `<web_search>{...}</web_search>`).
 - Invalid: combining name and args into one string, XML tags, or markdown code blocks for tools.
-- Never answer live-fact questions from memory when web_search is appropriate.
+- After a tool runs, answer in plain natural language using the tool result — never repeat the tool call.
 
 ## When to use multiple tools
 Only chain tools when the user clearly needs two different capabilities. Examples:
@@ -317,6 +318,59 @@ def _parse_malformed_tool_name(raw_name: str):
         return tool_name, None
 
 
+def _tool_name_pattern() -> str:
+    return "|".join(re.escape(n) for n in sorted(TOOL_NAMES))
+
+
+def _tool_calls_from_text(text: str) -> list:
+    """
+    Recover tool calls when the model writes them as plain text / XML instead of
+    structured tool_calls — e.g. <web_search>{\"query\": \"...\"}</web_search>.
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+
+    pattern = _tool_name_pattern()
+
+    xml_match = re.search(
+        rf"<({pattern})>\s*(\{{.*?\}})\s*</\1>",
+        text,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if xml_match:
+        name, args_str = xml_match.group(1), xml_match.group(2)
+        try:
+            return [{"name": name, "args": json.loads(args_str)}]
+        except json.JSONDecodeError:
+            pass
+
+    inline_match = re.match(rf"^({pattern})\s*(\{{.*\}})\s*$", text, re.DOTALL)
+    if inline_match:
+        name, args_str = inline_match.group(1), inline_match.group(2)
+        try:
+            return [{"name": name, "args": json.loads(args_str)}]
+        except json.JSONDecodeError:
+            pass
+
+    return []
+
+
+def _aimessage_with_tool_calls(name: str, args: dict, msg: Optional[AIMessage] = None) -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": name,
+                "args": args,
+                "id": f"call_{uuid.uuid4().hex[:8]}",
+                "type": "tool_call",
+            }
+        ],
+        id=getattr(msg, "id", None) if msg else None,
+    )
+
+
 def _sanitize_ai_response(msg: AIMessage) -> AIMessage:
     """
     Repair malformed tool calls from Groq/Llama before LangGraph runs ToolNode.
@@ -356,25 +410,21 @@ def _sanitize_ai_response(msg: AIMessage) -> AIMessage:
     if not text:
         return msg
 
+    recovered = _tool_calls_from_text(text)
+    if recovered:
+        tc = recovered[0]
+        if tc["name"] in TOOL_NAMES:
+            return _aimessage_with_tool_calls(tc["name"], tc["args"], msg)
+
     inline = re.match(
-        rf"^({'|'.join(re.escape(n) for n in sorted(TOOL_NAMES))})\s*(\{{.*\}})\s*$",
+        rf"^({_tool_name_pattern()})\s*(\{{.*\}})\s*$",
         text,
         re.DOTALL,
     )
     if inline:
         name, args = inline.group(1), json.loads(inline.group(2))
         if name in TOOL_NAMES:
-            return AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "name": name,
-                        "args": args,
-                        "id": f"call_{uuid.uuid4().hex[:8]}",
-                        "type": "tool_call",
-                    }
-                ],
-            )
+            return _aimessage_with_tool_calls(name, args, msg)
     return msg
 
 
@@ -388,11 +438,21 @@ def _stream_bound_llm(bound_llm, messages, writer) -> AIMessage:
     gathered = None
     for chunk in bound_llm.stream(messages):
         gathered = chunk if gathered is None else gathered + chunk
+        if getattr(chunk, "tool_call_chunks", None) or getattr(chunk, "tool_calls", None):
+            continue
         token = extract_chunk_text(chunk)
-        if token and writer:
-            writer({"token": token})
+        if not token or not writer:
+            continue
+        # Do not stream XML / inline tool syntax to the user
+        if re.search(rf"</?({_tool_name_pattern()})>", token, re.IGNORECASE):
+            continue
+        writer({"token": token})
     result = gathered if gathered is not None else AIMessage(content="")
-    return _sanitize_ai_response(result)
+    sanitized = _sanitize_ai_response(result)
+    # If we recovered tool calls from text, ensure none of that was meant for the user
+    if getattr(sanitized, "tool_calls", None):
+        return sanitized
+    return sanitized
 
 
 def _invoke_bound_llm(bound_llm, messages, writer) -> AIMessage:
@@ -405,18 +465,16 @@ def _invoke_bound_llm(bound_llm, messages, writer) -> AIMessage:
 
 def _run_chat_llm(messages, writer, *, prefer_stream: bool = False) -> AIMessage:
     """
-    Run chat with tools. Text chat: invoke-first (reliable tool JSON on Groq Llama).
-    Voice mode: stream-first so tokens reach TTS sooner.
+    Run chat with tools. Invoke-first for reliable tool JSON on Groq Llama.
+    Streaming is fallback only — avoids narrating XML tool calls as the answer.
     """
     candidates = [
         (llm_with_tools_invoke, llm_with_tools),
         (_tool_fallback_with_tools_invoke, _tool_fallback_with_tools),
     ]
 
-    if prefer_stream:
-        runner_order = (_stream_bound_llm, _invoke_bound_llm)
-    else:
-        runner_order = (_invoke_bound_llm, _stream_bound_llm)
+    # Always invoke-first: stream-first caused models to print <tool>{json}</tool> as text
+    runner_order = (_invoke_bound_llm, _stream_bound_llm)
 
     last_error = None
     for invoke_llm, stream_llm in candidates:
