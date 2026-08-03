@@ -83,7 +83,7 @@ function Sidebar({ threads, titles, threadId, onNew, onLoad, onDelete, isOpen, o
           <div className="logo-orb">🧠</div>
           <div>
             <div className="logo-name">Synapse AI</div>
-            <div className="logo-tag">Powered by LLama 3.3 LLM</div>
+            <div className="logo-tag">Powered by GPT-OSS 120B</div>
           </div>
         </div>
 
@@ -211,9 +211,9 @@ function VoiceStatusBar({ voiceMode, listening, speaking, onStop }) {
 function InputBar({
   value, onChange, onSend, disabled,
   voiceSupported, voiceMode, listening, speaking,
-  onVoiceToggle,
+  onVoiceToggle, inputRef,
 }) {
-  const ref = useRef(null);
+  const ref = inputRef || useRef(null);
   useEffect(() => {
     if (ref.current) { ref.current.style.height = "auto"; ref.current.style.height = `${ref.current.scrollHeight}px`; }
   }, [value]);
@@ -274,6 +274,7 @@ export default function App() {
   const [voiceError,  setVoiceError]  = useState(null);
 
   const voiceRef = useRef(null);
+  const inputElRef = useRef(null);
   const voiceSupported = isVoiceSupported();
 
   // ✅ FIX: threadMessages stores the FULL message history per thread
@@ -451,6 +452,12 @@ export default function App() {
     } finally {
       setStreaming(false); setStreamMsg(""); setToolStatus(null); streamRef.current = "";
       if (fromVoice) voiceRef.current?.notifyAssistantTurnComplete();
+      if (!fromVoice) {
+        // Re-focus the input — a disabled→enabled textarea doesn't regain
+        // browser focus automatically, so without this you have to click
+        // back into the box before typing again after every AI reply.
+        requestAnimationFrame(() => inputElRef.current?.focus());
+      }
     }
   }, [streaming, messages, threadId, threads]);
 
@@ -532,6 +539,7 @@ export default function App() {
           listening={listening}
           speaking={speaking}
           onVoiceToggle={handleVoiceToggle}
+          inputRef={inputElRef}
         />
       </main>
     </div>
