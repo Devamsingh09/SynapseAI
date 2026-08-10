@@ -15,7 +15,6 @@ import sqlite3
 import threading
 import uuid
 from datetime import datetime
-
 import pytz
 from tools import (
     rag_tool,
@@ -26,8 +25,6 @@ from tools import (
     get_weather,
     wikipedia_search,
     convert_currency,
-    lookup_pincode,
-    fetch_url,
     github_search,
     geo_lookup,
 )
@@ -38,19 +35,23 @@ load_dotenv(os.path.join(_BACKEND_DIR, ".env"), override=True)
 from langchain_groq import ChatGroq
 
 GROQ_API_KEY = (os.getenv("GROQ_API_KEY") or "").strip()
-CHAT_MODEL = os.getenv("GROQ_CHAT_MODEL", "llama-3.3-70b-versatile")
-# Fallback when Groq returns tool_use_failed (common with Llama + tools)
-TOOL_FALLBACK_MODEL = os.getenv("GROQ_TOOL_FALLBACK_MODEL", "qwen/qwen3-32b")
-SUMMARY_MODEL = os.getenv("GROQ_SUMMARY_MODEL", "llama-3.1-8b-instant")
+
+CHAT_MODEL = os.getenv("GROQ_CHAT_MODEL", "openai/gpt-oss-120b")
+# Fallback if the main model returns a malformed/failed tool call.
+# Must be a NON-Harmony model (i.e. not another gpt-oss model) so it can
+# actually recover from Harmony-specific failures on the primary model.
+TOOL_FALLBACK_MODEL = os.getenv("GROQ_TOOL_FALLBACK_MODEL", "qwen/qwen3.6-27b")
+SUMMARY_MODEL = os.getenv("GROQ_SUMMARY_MODEL", "openai/gpt-oss-20b")
 
 
-def _make_groq(model: str, streaming: bool = True, timeout: int = 120) -> ChatGroq:
+def _make_groq(model: str, streaming: bool = True, timeout: int = 120, max_tokens: int = 1024) -> ChatGroq:
     return ChatGroq(
         model=model,
         temperature=0,
         api_key=GROQ_API_KEY,
         streaming=streaming,
         request_timeout=timeout,
+        max_tokens=max_tokens,
     )
 
 
@@ -64,8 +65,6 @@ tools = [
     get_weather,
     wikipedia_search,
     convert_currency,
-    lookup_pincode,
-    fetch_url,
     github_search,
     geo_lookup,
     web_search,
@@ -74,96 +73,51 @@ tools = [
     current_datetime,
 ]
 TOOL_NAMES = {t.name for t in tools}
+
 _bind_kw = {"tool_choice": "auto", "parallel_tool_calls": False}
 llm_with_tools = llm.bind_tools(tools, **_bind_kw)
 llm_with_tools_invoke = llm_invoke.bind_tools(tools, **_bind_kw)
 
 _tool_fallback_llm = None
 _tool_fallback_with_tools = None
+_tool_fallback_with_tools_invoke = None
 _tool_fallback_invoke = None
 if TOOL_FALLBACK_MODEL and TOOL_FALLBACK_MODEL != CHAT_MODEL:
     _tool_fallback_llm = _make_groq(TOOL_FALLBACK_MODEL)
     _tool_fallback_invoke = _make_groq(TOOL_FALLBACK_MODEL, streaming=False)
     _tool_fallback_with_tools = _tool_fallback_llm.bind_tools(tools, **_bind_kw)
     _tool_fallback_with_tools_invoke = _tool_fallback_invoke.bind_tools(tools, **_bind_kw)
-else:
-    _tool_fallback_with_tools_invoke = None
 
-# 3. DEFINE STATE 
+
+# 3. DEFINE STATE
 class ChatState(TypedDict):
     messages: Annotated[list, add_messages]
     summary: str
 
-#  4. NODES
+# 4. NODES
 
 SYSTEM_PROMPT = """You are Synapse AI — a helpful, accurate assistant (a focused mini ChatGPT-style agent).
-
 ## How you respond
 - Be clear, friendly, and direct. Match the user's tone and depth.
 - Prefer short, useful answers. Use lists or steps only when they genuinely help.
 - If you are unsure, say so. Do not invent live data (prices, news, dates, document quotes).
 - After using tools, always give a final natural-language answer — never stop at raw tool output.
-- For facts from web_search, base your answer on the search results, not on memory alone.
 - A reference date/time for today is provided below — use that year in search queries. Do NOT call current_datetime unless the user explicitly asks for the time or date.
-
-## Your tools (use when needed)
-You have: get_weather, wikipedia_search, convert_currency, lookup_pincode, fetch_url, github_search, geo_lookup, web_search, rag_tool, calculator, get_stock_price, current_datetime.
-
-## Specialized tools (prefer these over web_search when they fit)
-- **get_weather** — weather for a city/place (e.g. "weather in Chennai").
+## Your tools
+- **web_search** — up-to-date facts: news, elections, sports results, office-holders, "latest/today/current". Base your answer on the results, not memory — trust search over memory if they conflict. One search per fact is enough — do not re-search to double-check an answer you already have unless the first search returned no results or was clearly wrong.
+- **get_weather** — weather for a city/place.
 - **wikipedia_search** — encyclopedia facts, history, definitions, biographies (not live news).
-- **convert_currency** — money conversion with live rates (USD, INR, EUR, etc.).
-- **lookup_pincode** — Indian 6-digit pincode → state, district, post offices.
-- **fetch_url** — read text from a URL the user shared.
-- **github_search** — find GitHub repos or users (search_type: repositories or users).
-- **geo_lookup** — IP address → country/city/ISP (optional ip; empty = server public IP).
-
-## Live / current facts (use web_search — do not rely on memory)
-For anything that may have changed after your training data, call **web_search** directly with a clear query (include the current year from the reference date below).
-
-Use web_search for:
-- Chief Minister, PM, President, Governor, elections, who is in power
-- News, sports results (e.g. IPL winner), recent events
-- Commodity/market prices without a stock ticker (e.g. silver, gold) — search the web
-- "Latest", "today", "now", "current", "recent"
-
-Example — "Who is the CM of Tamil Nadu?":
-→ web_search("Tamil Nadu Chief Minister <current year>")
-
-If search results conflict with your memory, **trust the search results**.
-
-### web_search
-Primary tool for up-to-date information. One focused query per call.
-
-### get_stock_price
-USE only for **listed stock tickers** (e.g. AAPL, TSLA, NVDA).
-DO NOT use for commodities (silver, gold) — use web_search instead.
-
-### calculator
-USE for explicit arithmetic (add, sub, mul, div).
-
-### current_datetime
-USE **only** when the user explicitly asks "what time is it" or "what's the date".
-DO NOT call this before web_search or for office-holder / news questions — today's date is already in your system context.
-
-### rag_tool
-USE for questions about uploaded/stored documents (ethics PDF, course material).
-
-## Tool calling rules (critical)
-- Call **one tool at a time** with the exact registered tool name and separate JSON arguments.
-- Valid: tool name `web_search` with argument `{"query": "Tamil Nadu CM 2026"}`
-- **NEVER** write tool calls as text, XML, or tags in your reply (wrong: `<web_search>{...}</web_search>`).
-- Invalid: combining name and args into one string, XML tags, or markdown code blocks for tools.
-- After a tool runs, answer in plain natural language using the tool result — never repeat the tool call.
-
-## When to use multiple tools
-Only chain tools when the user clearly needs two different capabilities. Examples:
-- "Apple stock price and today's AI news" → get_stock_price, then web_search.
-- "Search inflation news and add 5% to 1200" → web_search, then calculator.
-
+- **convert_currency** — money conversion with live rates.
+- **get_stock_price** — listed stock tickers only (AAPL, TSLA, NVDA). NOT for commodities like gold/silver — use web_search for those.
+- **calculator** — explicit arithmetic.
+- **github_search** — GitHub repos or users.
+- **geo_lookup** — IP address → country/city/ISP.
+- **current_datetime** — only when explicitly asked "what time/date is it" (today's date is already in your context otherwise).
+- **rag_tool** — questions about the uploaded/stored document (ethics PDF, course material).
+## Multi-tool queries
+Chain tools only when the user clearly needs two different capabilities, e.g. "Apple stock price and today's AI news" → get_stock_price, then web_search.
 ## When NOT to use tools
-- Greetings, thanks, small talk, creative writing, static explanations (no live data needed).
-
+Greetings, thanks, small talk, creative writing, static explanations — no live data needed.
 ## Tool loop behavior
 After a tool returns, either call another tool if still needed, or write your final answer. Never stop at raw tool output alone."""
 
@@ -215,7 +169,6 @@ def extract_chunk_text(chunk) -> str:
         text = extract_ai_text(chunk.content)
         if text:
             return text
-        # Skip tool-call chunks (no user-visible text yet)
         if getattr(chunk, "tool_call_chunks", None) or getattr(chunk, "tool_calls", None):
             return ""
     if hasattr(chunk, "content"):
@@ -290,7 +243,8 @@ def iter_chat_stream(
 
             yield ("done", None)
         except Exception as exc:
-            yield ("error", str(exc))
+            print(f"[chat_stream error] thread={thread_id}: {type(exc).__name__}: {exc}")
+            yield ("error", "Something went wrong on my end. Please try again in a moment.")
 
 
 def _is_groq_tool_failure(exc: Exception) -> bool:
@@ -375,35 +329,32 @@ def _sanitize_ai_response(msg: AIMessage) -> AIMessage:
     """
     Repair malformed tool calls from Groq/Llama before LangGraph runs ToolNode.
     Fixes names like web_search{\"query\": \"...\"} merged into one string.
+    Drops tool calls with an empty/unrecognized name instead of forwarding them —
+    a malformed tool_call/ToolMessage pair persisted into history breaks Groq's
+    Harmony renderer on the NEXT request ("Tools should have a name!").
     """
     tool_calls = list(getattr(msg, "tool_calls", None) or [])
     if tool_calls:
         fixed_calls = []
-        changed = False
+        dropped_any = False
         for tc in tool_calls:
-            name = tc.get("name", "")
+            name = (tc.get("name") or "").strip()
             args = tc.get("args") or {}
             parsed_name, parsed_args = _parse_malformed_tool_name(name)
             if parsed_name in TOOL_NAMES:
                 new_args = parsed_args if parsed_args else args
-                if parsed_name != name or (parsed_args and parsed_args != args):
-                    changed = True
                 fixed_calls.append(
-                    {
-                        **tc,
-                        "name": parsed_name,
-                        "args": new_args,
-                        "type": tc.get("type") or "tool_call",
-                    }
+                    {**tc, "name": parsed_name, "args": new_args, "type": tc.get("type") or "tool_call"}
                 )
-            else:
+            elif name in TOOL_NAMES:
                 fixed_calls.append(tc)
-        if changed:
-            return AIMessage(
-                content=msg.content or "",
-                tool_calls=fixed_calls,
-                id=getattr(msg, "id", None),
-            )
+            else:
+                dropped_any = True
+        if fixed_calls:
+            return AIMessage(content=msg.content or "", tool_calls=fixed_calls, id=getattr(msg, "id", None))
+        if dropped_any:
+            fallback = extract_ai_text(msg.content) or "I couldn't complete that tool call — could you rephrase?"
+            return AIMessage(content=fallback, id=getattr(msg, "id", None))
         return msg
 
     text = extract_ai_text(msg.content).strip()
@@ -443,16 +394,11 @@ def _stream_bound_llm(bound_llm, messages, writer) -> AIMessage:
         token = extract_chunk_text(chunk)
         if not token or not writer:
             continue
-        # Do not stream XML / inline tool syntax to the user
         if re.search(rf"</?({_tool_name_pattern()})>", token, re.IGNORECASE):
             continue
         writer({"token": token})
     result = gathered if gathered is not None else AIMessage(content="")
-    sanitized = _sanitize_ai_response(result)
-    # If we recovered tool calls from text, ensure none of that was meant for the user
-    if getattr(sanitized, "tool_calls", None):
-        return sanitized
-    return sanitized
+    return _sanitize_ai_response(result)
 
 
 def _invoke_bound_llm(bound_llm, messages, writer) -> AIMessage:
@@ -463,7 +409,7 @@ def _invoke_bound_llm(bound_llm, messages, writer) -> AIMessage:
     return response
 
 
-def _run_chat_llm(messages, writer, *, prefer_stream: bool = False) -> AIMessage:
+def _run_chat_llm(messages, writer) -> AIMessage:
     """
     Run chat with tools. Invoke-first for reliable tool JSON on Groq Llama.
     Streaming is fallback only — avoids narrating XML tool calls as the answer.
@@ -474,16 +420,11 @@ def _run_chat_llm(messages, writer, *, prefer_stream: bool = False) -> AIMessage
     ]
 
     # Always invoke-first: stream-first caused models to print <tool>{json}</tool> as text
-    runner_order = (_invoke_bound_llm, _stream_bound_llm)
-
     last_error = None
     for invoke_llm, stream_llm in candidates:
         if invoke_llm is None or stream_llm is None:
             continue
-        for runner, bound in (
-            (runner_order[0], stream_llm if runner_order[0] is _stream_bound_llm else invoke_llm),
-            (runner_order[1], stream_llm if runner_order[1] is _stream_bound_llm else invoke_llm),
-        ):
+        for runner, bound in ((_stream_bound_llm, stream_llm), (_invoke_bound_llm, invoke_llm)):
             try:
                 return runner(bound, messages, writer)
             except Exception as exc:
@@ -510,62 +451,112 @@ def chat_node(state: ChatState, config: RunnableConfig):
     messages = [system_msg] + messages
 
     writer = get_stream_writer()
-    gathered = _run_chat_llm(messages, writer, prefer_stream=voice_mode)
+    gathered = _run_chat_llm(messages, writer)
     return {"messages": [gathered]}
 
+
+def _messages_to_plain_text(messages) -> str:
+    """Convert LangChain messages to plain 'role: content' text — no metadata,
+    no tool_call payloads, no repr() junk — before sending to the summarizer."""
+    lines = []
+    for m in messages:
+        role = getattr(m, "type", None) or m.__class__.__name__
+        text = extract_ai_text(getattr(m, "content", ""))
+        if not text and getattr(m, "tool_calls", None):
+            names = ", ".join(tc.get("name", "?") for tc in m.tool_calls)
+            text = f"[called tool(s): {names}]"
+        if text:
+            lines.append(f"{role}: {text}")
+    return "\n".join(lines)
+
+
+_RAW_WINDOW_CHAR_BUDGET = 4000
+
+
+def _split_by_char_budget(messages, budget: int):
+    """Walk backwards from the most recent message, keeping messages raw
+    until the char budget runs out. Always keeps at least the last message,
+    even if it alone exceeds the budget.
+    Guarantee: the kept/raw window must include at least the most recent
+    HumanMessage, even if that means exceeding the budget slightly. Some
+    model chat templates (e.g. Qwen) hard-require a user-role message to be
+    present and error out otherwise ("No user query found in messages")."""
+    kept = []
+    total = 0
+    for m in reversed(messages):
+        content = getattr(m, "content", "")
+        size = len(content) if isinstance(content, str) else len(str(content))
+        if kept and total + size > budget:
+            break
+        kept.append(m)
+        total += size
+    kept.reverse()
+    cutoff = len(messages) - len(kept)
+
+    if not any(isinstance(m, HumanMessage) for m in kept):
+        for i in range(cutoff - 1, -1, -1):
+            if isinstance(messages[i], HumanMessage):
+                cutoff = i
+                kept = messages[cutoff:]
+                break
+
+    return messages[:cutoff], kept
+
+
 def summarize_conversation(state: ChatState):
-    """Compresses old messages into a summary"""
+    """Compresses old messages into a summary. Only runs once a turn has fully
+    completed (see should_summarize) — never mid-tool-loop."""
     summary = state.get("summary", "")
     messages = state["messages"]
-    
-    # --- THE 12/4 RULE ---
-    # We keep the last 4 messages RAW (perfect memory).
-    # We summarize everything before that.
-    messages_to_summarize = messages[:-4] 
-    
+
+    messages_to_summarize, _kept_raw = _split_by_char_budget(messages, _RAW_WINDOW_CHAR_BUDGET)
+
     if not messages_to_summarize:
-        return {"summary": summary} 
-    
-    # Prompt Logic
+        return {"summary": summary}
+
+    plain_text = _messages_to_plain_text(messages_to_summarize)
+
     if summary:
         prompt = (
             f"Current Summary: {summary}\n\n"
             "New lines to add:\n"
-            f"{messages_to_summarize}\n\n"
-            "INSTRUCTION: Update the summary. Keep it concise but PRESERVE specific entities (names, dates, errors, code snippets). Do not lose technical details."
+            f"{plain_text}\n\n"
+            "INSTRUCTION: Rewrite the summary (do not just append). Keep it under ~250 words. "
+            "PRESERVE specific entities (names, dates, errors, code snippets). Do not lose technical details."
         )
     else:
         prompt = (
-            "Create a summary of this conversation. "
-            "PRESERVE specific entities (names, dates, errors, code snippets). "
-            f"Lines: {messages_to_summarize}"
+            "Create a summary of this conversation in under ~250 words. "
+            "PRESERVE specific entities (names, dates, errors, code snippets).\n\n"
+            f"Lines:\n{plain_text}"
         )
 
-    # Generate new summary using the Mini-Brain
-    response = summary_llm.invoke([HumanMessage(content=prompt)])
+    response = summary_llm.invoke(
+        [HumanMessage(content=prompt)],
+        max_tokens=400,
+    )
     new_summary = response.content
-    
-    # Deleting the processed messages from DB to free up tokens
+
     delete_messages = [RemoveMessage(id=m.id) for m in messages_to_summarize]
-    
+
     return {"summary": new_summary, "messages": delete_messages}
 
-def should_summarize(state: ChatState) -> Literal["summarize_conversation", "tools", END]:
-    """Decides if we need to summarize"""
+
+def should_summarize(state: ChatState) -> Literal["tools", "summarize_conversation", END]:
+    """Routes to tool execution if the model requested it. Once the turn is fully
+    complete (no more tool calls), checks context size and routes to summarization
+    if needed — this only prepares history for the NEXT turn, it never interrupts
+    the current one mid-flight."""
     messages = state["messages"]
-    
-    # 1. If tools are called, GO TO TOOLS (Do not summarize yet)
     if hasattr(messages[-1], "tool_calls") and len(messages[-1].tool_calls) > 0:
         return "tools"
-    
-    # 2. TRIGGER: If we have more than 12 messages, clean up memory
-    if len(messages) > 12:
+    to_summarize, _kept_raw = _split_by_char_budget(messages, _RAW_WINDOW_CHAR_BUDGET)
+    if to_summarize:
         return "summarize_conversation"
-    
-    # 3. Otherwise, stop and wait for user
     return END
 
-#  5. GRAPH CONSTRUCTION 
+
+# 5. GRAPH CONSTRUCTION
 
 conn = sqlite3.connect("chatbot.db", check_same_thread=False, timeout=30)
 configure_sqlite_connection(conn)
@@ -578,7 +569,6 @@ graph.add_node("chat_node", chat_node)
 graph.add_node("tools", ToolNode(tools))
 graph.add_node("summarize_conversation", summarize_conversation)
 
-# Flow Logic
 graph.add_edge(START, "chat_node")
 graph.add_conditional_edges("chat_node", should_summarize)
 graph.add_edge("tools", "chat_node")
@@ -586,7 +576,7 @@ graph.add_edge("summarize_conversation", END)
 
 chatbot = graph.compile(checkpointer=checkpointer)
 
-# HELPER FUNCTIONS 
+# HELPER FUNCTIONS
 
 def retrieve_all_threads():
     cursor = conn.cursor()
@@ -607,4 +597,4 @@ def generate_summary(text):
         title = response.content.strip().replace('"', '').replace("'", "").replace("Title:", "").strip()
         return title if len(title) < 30 else title[:27] + "..."
     except:
-        return "New Conversation"
+        return "New Conversation" 
