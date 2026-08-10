@@ -1,3 +1,47 @@
+
+Hugging Face's logo
+Hugging Face
+Models
+Datasets
+Spaces
+Buckets
+new
+Docs
+Pricing
+
+Log In
+Sign Up
+Spaces:
+ThakurDev09
+/
+synapse-ai-backend
+
+
+like
+1
+App
+Files
+Community
+synapse-ai-backend
+/
+tools.py
+
+ThakurDev09's picture
+ThakurDev09
+Update tools.py
+c513462
+verified
+7 days ago
+Raw
+
+Download with hf CLI
+
+Copy download link
+History
+Blame
+Contribute
+Delete
+16.4 kB
 import os
 from datetime import datetime
 from typing import Optional
@@ -19,7 +63,9 @@ _vector_store = FAISS.load_local(
     allow_dangerous_deserialization=True,
 )
 _retriever = _vector_store.as_retriever(search_kwargs={"k": 4})
-
+def get_embeddings():
+    """Expose the already-loaded embeddings model for reuse elsewhere (tool routing)."""
+    return _embeddings
 
 def _tavily_client() -> TavilyClient:
     api_key = os.getenv("TAVILY_API_KEY")
@@ -56,26 +102,26 @@ def web_search(query: str) -> str:
         client = _tavily_client()
         response = client.search(
             query=query,
-            search_depth="advanced",
-            max_results=5,
+            max_results=3,
             include_answer=True,
         )
 
         parts = []
         answer = response.get("answer")
         if answer:
-            parts.append(f"Summary: {answer}")
+            parts.append(f"Summary: {answer[:500]}")  # cap the summary itself
 
         results = response.get("results") or []
         for i, hit in enumerate(results, 1):
             title = hit.get("title", "")
-            content = hit.get("content", "")
+            content = (hit.get("content", "") or "")[:350]  # cap per-result content
             url = hit.get("url", "")
             parts.append(f"{i}. {title}\n{content}\nSource: {url}")
 
         if not parts:
             return "No web results found."
-        return "\n\n".join(parts)
+        combined = "\n\n".join(parts)
+        return combined[:1800]  # hard cap on total tool-result size
     except Exception as e:
         return f"Web search failed: {type(e).__name__}: {e}"
 
@@ -443,3 +489,4 @@ def current_datetime(tz_name: str = "Asia/Kolkata") -> str:
     """Return current date & time for a given timezone (default: Asia/Kolkata)."""
     tz = pytz.timezone(tz_name)
     return datetime.now(tz).strftime("%A, %d %B %Y, %I:%M:%S %p %Z")
+
