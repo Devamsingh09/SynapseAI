@@ -1,47 +1,3 @@
-
-Hugging Face's logo
-Hugging Face
-Models
-Datasets
-Spaces
-Buckets
-new
-Docs
-Pricing
-
-Log In
-Sign Up
-Spaces:
-ThakurDev09
-/
-synapse-ai-backend
-
-
-like
-1
-App
-Files
-Community
-synapse-ai-backend
-/
-tools.py
-
-ThakurDev09's picture
-ThakurDev09
-Update tools.py
-c513462
-verified
-7 days ago
-Raw
-
-Download with hf CLI
-
-Copy download link
-History
-Blame
-Contribute
-Delete
-16.4 kB
 import os
 from datetime import datetime
 from typing import Optional
@@ -489,4 +445,3 @@ def current_datetime(tz_name: str = "Asia/Kolkata") -> str:
     """Return current date & time for a given timezone (default: Asia/Kolkata)."""
     tz = pytz.timezone(tz_name)
     return datetime.now(tz).strftime("%A, %d %B %Y, %I:%M:%S %p %Z")
-
