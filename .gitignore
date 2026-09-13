@@ -3,3 +3,5 @@
 node_modules
 /build
 backend.zip
+*.db-shm
+*.db-wal
