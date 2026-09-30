@@ -1,6 +1,6 @@
 """
 File upload processing — PDF/DOCX text extraction, and image understanding
-via Groq's vision model (qwen/qwen3.6-27b). Uses the raw Groq SDK for the
+via Groq's vision model (qwen/qwen3.8-27b). Uses the raw Groq SDK for the
 vision call since langchain-groq's message conversion can silently drop
 multimodal (image_url) content blocks depending on the installed version.
 """
@@ -12,7 +12,7 @@ from typing import Tuple
 from groq import Groq
 
 GROQ_API_KEY = (os.getenv("GROQ_API_KEY") or "").strip()
-VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.6-27b")
+VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
 
 MAX_FILE_BYTES = 15 * 1024 * 1024   # stay comfortably under Groq's 20MB image limit
 MAX_EXTRACTED_CHARS = 12000          # cap injected doc text so it doesn't dominate context

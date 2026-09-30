@@ -1,15 +1,18 @@
+import re
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
-from fastapi.responses import StreamingResponse, Response
+from fastapi import Depends, FastAPI, HTTPException, Response, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from langchain_core.messages import HumanMessage, AIMessage
 import uuid
 import json
 import asyncio
 
+import auth
+import email_service
 from chatbot_backend import (
     chatbot,
     retrieve_all_threads,
@@ -49,9 +52,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Synapse AI API", version="1.1.0", lifespan=lifespan)
 
+# Auth uses an httpOnly session cookie, which browsers refuse to send/accept
+# cross-origin when the server allows "*" with credentials — so this must be
+# an explicit origin list rather than a wildcard once login exists.
+_FRONTEND_ORIGINS = [o.strip() for o in auth.FRONTEND_ORIGIN.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_FRONTEND_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -75,6 +82,54 @@ class SummaryRequest(BaseModel):
 class TtsRequest(BaseModel):
     text: str
     voice: Optional[str] = None
+
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+class SignupRequest(BaseModel):
+    email: str
+    password: str
+
+    @field_validator("email")
+    @classmethod
+    def _valid_email(cls, v: str) -> str:
+        v = v.strip().lower()
+        if not _EMAIL_RE.match(v):
+            raise ValueError("Enter a valid email address.")
+        return v
+
+    @field_validator("password")
+    @classmethod
+    def _valid_password(cls, v: str) -> str:
+        if len(v) < 8:
+            raise ValueError("Password must be at least 8 characters.")
+        return v
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def _valid_password(cls, v: str) -> str:
+        if len(v) < 8:
+            raise ValueError("Password must be at least 8 characters.")
+        return v
+
+
+class ResendVerificationRequest(BaseModel):
+    email: str
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -146,23 +201,123 @@ async def health():
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# AUTH ROUTES
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _user_payload(user) -> dict:
+    return {"id": user.id, "email": user.email, "is_verified": user.is_verified}
+
+
+@app.post("/auth/signup", status_code=201)
+async def signup(req: SignupRequest):
+    """Create an account and email a verification link. Login is blocked
+    until the email is verified (full verify+reset flow, not basic auth)."""
+    try:
+        async with io_slot():
+            user = await run_in_pool(auth.create_user, req.email, req.password, timeout=IO_TIMEOUT_SEC)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    token = auth.create_verification_token(user.id)
+    email_sent = email_service.send_verification_email(user.email, token)
+    return {
+        "message": "Account created. Check your email to verify your account before logging in.",
+        "email_sent": email_sent,
+    }
+
+
+@app.get("/auth/verify-email")
+async def verify_email(token: str):
+    """Called by the link in the verification email."""
+    user_id = auth.consume_email_token(token, "verify_email")
+    if user_id is None:
+        raise HTTPException(status_code=400, detail="This verification link is invalid or has expired.")
+    auth.mark_verified(user_id)
+    return {"message": "Email verified — you can now log in."}
+
+
+@app.post("/auth/resend-verification")
+async def resend_verification(req: ResendVerificationRequest):
+    """Always returns success regardless of whether the email exists/is
+    already verified — avoids leaking which emails have accounts."""
+    user = auth.get_user_by_email(req.email)
+    if user and not user["is_verified"]:
+        token = auth.create_verification_token(user["id"])
+        email_service.send_verification_email(user["email"], token)
+    return {"message": "If that email has a pending account, a new verification link has been sent."}
+
+
+@app.post("/auth/login")
+async def login(req: LoginRequest, response: Response):
+    user = auth.get_user_by_email(req.email)
+    if not user or not auth.verify_password(req.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Incorrect email or password.")
+    if not user["is_verified"]:
+        raise HTTPException(status_code=403, detail="Please verify your email before logging in.")
+
+    token = auth.create_access_token(user["id"], user["email"])
+    auth.set_session_cookie(response, token)
+    return {"id": user["id"], "email": user["email"], "is_verified": True}
+
+
+@app.post("/auth/logout")
+async def logout(response: Response):
+    auth.clear_session_cookie(response)
+    return {"message": "Logged out."}
+
+
+@app.get("/auth/me")
+async def me(current_user: auth.User = Depends(auth.get_current_user)):
+    return _user_payload(current_user)
+
+
+@app.post("/auth/forgot-password")
+async def forgot_password(req: ForgotPasswordRequest):
+    """Always returns success — never reveals whether the email has an account."""
+    user = auth.get_user_by_email(req.email)
+    if user:
+        token = auth.create_reset_token(user["id"])
+        email_service.send_password_reset_email(user["email"], token)
+    return {"message": "If that email has an account, a password reset link has been sent."}
+
+
+@app.post("/auth/reset-password")
+async def reset_password(req: ResetPasswordRequest):
+    user_id = auth.consume_email_token(req.token, "reset_password")
+    if user_id is None:
+        raise HTTPException(status_code=400, detail="This reset link is invalid or has expired.")
+    auth.update_password(user_id, req.new_password)
+    return {"message": "Password updated — you can now log in."}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# THREAD / CHAT ROUTES (require login)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 @app.post("/thread/new")
-async def new_thread():
-    """Create a new thread ID."""
-    return {"thread_id": str(uuid.uuid4())}
+async def new_thread(current_user: auth.User = Depends(auth.get_current_user)):
+    """Create a new thread ID, owned by the current user."""
+    tid = str(uuid.uuid4())
+    auth.claim_thread(tid, current_user.id)
+    return {"thread_id": tid}
 
 
 @app.get("/threads")
-async def get_threads():
-    """Return all saved thread IDs."""
+async def get_threads(current_user: auth.User = Depends(auth.get_current_user)):
+    """Return this user's thread IDs only."""
     async with io_slot():
-        threads = await run_in_pool(retrieve_all_threads, timeout=IO_TIMEOUT_SEC)
-    return {"threads": threads}
+        all_threads = await run_in_pool(retrieve_all_threads, timeout=IO_TIMEOUT_SEC)
+    owned = auth.list_user_thread_ids(current_user.id)
+    return {"threads": [t for t in all_threads if t in owned]}
 
 
 @app.get("/thread/{thread_id}/history")
-async def get_thread_history(thread_id: str):
+async def get_thread_history(thread_id: str, current_user: auth.User = Depends(auth.get_current_user)):
     """Load full message history for a thread from LangGraph state."""
+    auth.require_thread_owner(thread_id, current_user.id)
     try:
         async with io_slot():
             return await run_in_pool(_load_thread_history, thread_id, timeout=IO_TIMEOUT_SEC)
@@ -173,10 +328,13 @@ async def get_thread_history(thread_id: str):
 
 
 @app.delete("/thread/{thread_id}")
-async def delete_thread(thread_id: str):
+async def delete_thread(thread_id: str, current_user: auth.User = Depends(auth.get_current_user)):
     """Delete a thread and its data."""
+    auth.require_thread_owner(thread_id, current_user.id)
     async with io_slot():
-        return await run_in_pool(_delete_thread, thread_id, timeout=IO_TIMEOUT_SEC)
+        result = await run_in_pool(_delete_thread, thread_id, timeout=IO_TIMEOUT_SEC)
+    auth.delete_thread_ownership(thread_id)
+    return result
 
 
 @app.get("/voice/config")
@@ -209,7 +367,11 @@ async def voice_options():
 
 
 @app.post("/upload")
-async def upload_file(file: UploadFile = File(...), question: str = Form("")):
+async def upload_file(
+    file: UploadFile = File(...),
+    question: str = Form(""),
+    current_user: auth.User = Depends(auth.get_current_user),
+):
     """Extract text (PDF/DOCX) or describe an image (Groq vision). Returns
     content for the frontend to fold into the next chat message — doesn't
     touch LangGraph state directly."""
@@ -235,7 +397,7 @@ async def upload_file(file: UploadFile = File(...), question: str = Form("")):
 
 
 @app.post("/chat/summary")
-async def summarize(req: SummaryRequest):
+async def summarize(req: SummaryRequest, current_user: auth.User = Depends(auth.get_current_user)):
     """Generate a short title from the first user message."""
     async with io_slot():
         title = await run_in_pool(generate_summary, req.text, timeout=IO_TIMEOUT_SEC)
@@ -243,11 +405,20 @@ async def summarize(req: SummaryRequest):
 
 
 @app.post("/chat/stream")
-async def chat_stream(req: ChatRequest):
+async def chat_stream(req: ChatRequest, current_user: auth.User = Depends(auth.get_current_user)):
     """
     Stream the assistant reply using SSE.
     Up to MAX_CONCURRENT_REQUESTS (default 50) streams can run in parallel.
     """
+    # The frontend generates the very first thread_id client-side (before
+    # ever calling POST /thread/new), so ownership may not be claimed yet —
+    # claim it here on first use rather than requiring pre-registration.
+    # Once claimed, only the owner may keep chatting on that thread_id.
+    owner_id = auth.get_thread_owner(req.thread_id)
+    if owner_id is None:
+        auth.claim_thread(req.thread_id, current_user.id)
+    elif owner_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Thread not found")
 
     async def event_generator():
         async with chat_slot():

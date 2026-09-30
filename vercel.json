@@ -1,0 +1,11 @@
+{
+  "rewrites": [
+    { "source": "/auth/:path*", "destination": "https://thakurdev09-synapse-ai-backend.hf.space/auth/:path*" },
+    { "source": "/thread/:path*", "destination": "https://thakurdev09-synapse-ai-backend.hf.space/thread/:path*" },
+    { "source": "/threads", "destination": "https://thakurdev09-synapse-ai-backend.hf.space/threads" },
+    { "source": "/voice/:path*", "destination": "https://thakurdev09-synapse-ai-backend.hf.space/voice/:path*" },
+    { "source": "/upload", "destination": "https://thakurdev09-synapse-ai-backend.hf.space/upload" },
+    { "source": "/chat/:path*", "destination": "https://thakurdev09-synapse-ai-backend.hf.space/chat/:path*" },
+    { "source": "/health", "destination": "https://thakurdev09-synapse-ai-backend.hf.space/health" }
+  ]
+}

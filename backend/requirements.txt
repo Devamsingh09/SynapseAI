@@ -22,3 +22,7 @@ edge-tts
 pypdf
 python-docx
 python-multipart
+pytest
+bcrypt
+pyjwt
+resend

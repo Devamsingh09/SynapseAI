@@ -2,6 +2,9 @@
 chatbot.db
 chatbot.db-wal
 chatbot.db-shm
+auth.db
+auth.db-wal
+auth.db-shm
 __pycache__/
 *.pyc
 venv/

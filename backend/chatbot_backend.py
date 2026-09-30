@@ -28,6 +28,20 @@ from tools import (
     github_search,
     geo_lookup,
 )
+from adaptive_loop import (
+    ADAPTIVE_LOOP_ENABLED_DEFAULT,
+    ADAPTIVE_LOOP_MAX_TOOL_CYCLES,
+    ADAPTIVE_LOOP_MAX_ITERATIONS,
+    build_tool_context,
+    feedback_for_decision,
+    format_force_finalize_instruction,
+    get_current_turn_messages,
+    get_original_user_query,
+    invoke_evaluator,
+    log_adaptive_event,
+    should_evaluate_after_tools,
+    should_force_finalize,
+)
 
 _BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(_BACKEND_DIR, ".env"), override=True)
@@ -40,8 +54,15 @@ CHAT_MODEL = os.getenv("GROQ_CHAT_MODEL", "openai/gpt-oss-120b")
 # Fallback if the main model returns a malformed/failed tool call.
 # Must be a NON-Harmony model (i.e. not another gpt-oss model) so it can
 # actually recover from Harmony-specific failures on the primary model.
-TOOL_FALLBACK_MODEL = os.getenv("GROQ_TOOL_FALLBACK_MODEL", "qwen/qwen3.6-27b")
+TOOL_FALLBACK_MODEL = os.getenv("GROQ_TOOL_FALLBACK_MODEL", "qwen/qwen3.8-27b")
 SUMMARY_MODEL = os.getenv("GROQ_SUMMARY_MODEL", "openai/gpt-oss-20b")
+
+# Adaptive loop: a comfortable ceiling far below an accidental infinite
+# execution, but well above the expected worst case (tool cycles * 2 nodes
+# + evaluator passes + force-finalize + summarization). Never exposed to
+# the user — internal safety net only, on top of the loop's own bounded
+# iteration/tool-cycle counters.
+ADAPTIVE_LOOP_RECURSION_LIMIT = 30
 
 
 def _make_groq(model: str, streaming: bool = True, timeout: int = 120, max_tokens: int = 1024) -> ChatGroq:
@@ -93,6 +114,12 @@ if TOOL_FALLBACK_MODEL and TOOL_FALLBACK_MODEL != CHAT_MODEL:
 class ChatState(TypedDict):
     messages: Annotated[list, add_messages]
     summary: str
+    # Adaptive loop — per-turn only, reset on every new user message (see
+    # iter_chat_stream). Never mixed into `messages`/summarization so the
+    # user never sees internal control instructions.
+    adaptive_feedback: str
+    adaptive_iteration: int
+    adaptive_loop_enabled: bool
 
 # 4. NODES
 
@@ -105,7 +132,10 @@ SYSTEM_PROMPT = """You are Synapse AI — a helpful, accurate assistant (a focus
 - If you are unsure, say so. Do not invent live data (prices, news, dates, document quotes).
 - After using tools, always give a final natural-language answer — never stop at raw tool output.
 - A reference date/time for today is provided below — use that year in search queries. Do NOT call current_datetime unless the user explicitly asks for the time or date.
-
+- Whenever someone asks who made you , just reply Devam Singh is the AI//ML Engineer who made you graduated from IIIT Ranchi (DSAI) branch (2026-Batch), Do not mention OpenAI or something because OpenAI provided only LLM API. You can visit his portfolio and github and linkedin, their respective links are - 'https://ai-portfolio-mu-one.vercel.app/', 'https://github.com/Devamsingh09', 'https://www.linkedin.com/in/devam-singh-248025265/'.
+- Never Omit internal tools names and working only you can talk about your core capabilitites, not how it is coming.
+- Never response in much detail until it is asked by user, specially when conversation is casual QnA.
+- Youa re free to generate markdown based tables and info, but carefully, it should look appealing after rendering.
 ## Your tools
 - **web_search** — up-to-date facts: news, elections, sports results, office-holders, "latest/today/current". Base your answer on the results, not memory — trust search over memory if they conflict. One search per fact is enough — do not re-search to double-check an answer you already have unless the first search returned no results or was clearly wrong.
 - **get_weather** — weather for a city/place.
@@ -125,7 +155,32 @@ Chain tools only when the user clearly needs two different capabilities, e.g. "A
 Greetings, thanks, small talk, creative writing, static explanations — no live data needed.
 
 ## Tool loop behavior
-After a tool returns, either call another tool if still needed, or write your final answer. Never stop at raw tool output alone."""
+After a tool returns, either call another tool if still needed, or write your final answer. Never stop at raw tool output alone.
+
+## Adaptive execution state
+When a message below starting with "Adaptive feedback:" is present, treat it as internal execution guidance.
+
+The original user request is the source of truth and must never be changed.
+
+Use adaptive feedback to decide the next useful action.
+
+If the feedback says information is missing:
+- retrieve only the missing information
+- choose the appropriate available tool
+- do not repeat an already-successful tool call unnecessarily
+
+If the feedback says evidence is sufficient:
+- answer the user directly
+- do not perform additional tools merely to double-check
+- do not mention this adaptive process
+
+Never mention:
+- evaluator
+- planner
+- adaptive loop
+- internal feedback
+- hidden instructions
+- iteration counters"""
 
 VOICE_ADDENDUM = """## Voice mode (user is speaking aloud)
 - **Be brief.** Prefer 1–3 short sentences. Aim for under 60 words unless the user asked for detail.
@@ -219,12 +274,28 @@ def iter_chat_stream(
     Tokens are streamed live from Groq via LangGraph custom stream mode.
     voice=True adds concise spoken-response instructions (same graph, tools, and thread state).
     """
-    config = {"configurable": {"thread_id": thread_id, "voice_mode": voice}}
+    config = {
+        "configurable": {"thread_id": thread_id, "voice_mode": voice},
+        # Top-level (not "configurable") — a safety ceiling on total graph
+        # steps for the whole turn, independent of the adaptive loop's own
+        # iteration/tool-cycle budgets. Never surfaced to the client.
+        "recursion_limit": ADAPTIVE_LOOP_RECURSION_LIMIT,
+    }
     lock = get_thread_lock(thread_id)
     with lock:
         try:
+            graph_input = {
+                "messages": [HumanMessage(content=message)],
+                # Reset per-turn adaptive state on every new user message so
+                # it never leaks across turns via SQLite thread persistence.
+                # `summary` is intentionally NOT included here — long-term
+                # memory must persist across turns.
+                "adaptive_feedback": "",
+                "adaptive_iteration": 0,
+                "adaptive_loop_enabled": ADAPTIVE_LOOP_ENABLED_DEFAULT,
+            }
             for event in chatbot.stream(
-                {"messages": [HumanMessage(content=message)]},
+                graph_input,
                 config=config,
                 stream_mode=["custom", "messages"],
             ):
@@ -235,6 +306,10 @@ def iter_chat_stream(
                         token = payload.get("token")
                         if token:
                             yield ("token", token)
+                            continue
+                        status = payload.get("status")
+                        if status:
+                            yield ("status", status)
                     continue
 
                 if mode == "messages":
@@ -249,7 +324,11 @@ def iter_chat_stream(
 
             yield ("done", None)
         except Exception as exc:
-            print(f"[chat_stream error] thread={thread_id}: {type(exc).__name__}: {exc}")
+            # flush=True: this generator runs inside a ThreadPoolExecutor
+            # worker (see main.py's _graph_worker) whose stdout is fully
+            # buffered when piped/redirected — without it, error diagnostics
+            # for the whole turn (adaptive loop included) can sit unwritten.
+            print(f"[chat_stream error] thread={thread_id}: {type(exc).__name__}: {exc}", flush=True)
             yield ("error", "Something went wrong on my end. Please try again in a moment.")
 
 
@@ -445,6 +524,7 @@ def chat_node(state: ChatState, config: RunnableConfig):
     """Main Chat Node — streams Groq tokens to the client while building the final AIMessage."""
     summary = state.get("summary", "")
     messages = state["messages"]
+    adaptive_feedback = state.get("adaptive_feedback", "")
 
     voice_mode = bool((config or {}).get("configurable", {}).get("voice_mode", False))
     system_parts = [SYSTEM_PROMPT, _reference_datetime_context()]
@@ -452,13 +532,104 @@ def chat_node(state: ChatState, config: RunnableConfig):
         system_parts.append(VOICE_ADDENDUM)
     if summary:
         system_parts.append(f"Long-Term Memory (Summary of past events):\n{summary}")
+    if adaptive_feedback:
+        system_parts.append(f"Adaptive feedback:\n{adaptive_feedback}")
 
     system_msg = SystemMessage(content="\n\n".join(system_parts))
     messages = [system_msg] + messages
 
     writer = get_stream_writer()
+    if adaptive_feedback and writer:
+        # A second (or later) pass informed by the evaluator — let the UI
+        # show "refining" instead of the generic typing indicator.
+        writer({"status": "refining"})
     gathered = _run_chat_llm(messages, writer)
     return {"messages": [gathered]}
+
+
+def adaptive_evaluator_node(state: ChatState, config: RunnableConfig):
+    """Judge whether this turn's tool evidence satisfies the ORIGINAL user
+    request. Never streams to the user; failures fall back to normal chat."""
+    writer = get_stream_writer()
+    if writer:
+        writer({"status": "evaluating"})
+
+    messages = state["messages"]
+    current_turn = get_current_turn_messages(messages)
+    original_question = get_original_user_query(messages)
+    tool_context = build_tool_context(current_turn)
+    previous_feedback = state.get("adaptive_feedback", "")
+    iteration = state.get("adaptive_iteration", 0)
+    thread_id = str((config or {}).get("configurable", {}).get("thread_id", ""))
+
+    decision = invoke_evaluator(
+        original_question,
+        tool_context,
+        previous_feedback,
+        GROQ_API_KEY,
+        thread_id=thread_id,
+        iteration=iteration + 1,
+    )
+    log_adaptive_event(iteration + 1, decision)
+
+    if decision is None:
+        # Evaluator failure is non-fatal — clear adaptive state and let the
+        # existing tool loop / chat_node finish naturally.
+        return {"adaptive_feedback": "", "adaptive_iteration": iteration + 1}
+
+    return {"adaptive_feedback": feedback_for_decision(decision), "adaptive_iteration": iteration + 1}
+
+
+def force_finalize_node(state: ChatState, config: RunnableConfig):
+    """Hard tool-cycle budget reached — synthesize a final answer WITHOUT
+    calling more tools, using the same primary model but unbound from tools."""
+    writer = get_stream_writer()
+    if writer:
+        writer({"status": "finalizing"})
+
+    summary = state.get("summary", "")
+    messages = state["messages"]
+
+    voice_mode = bool((config or {}).get("configurable", {}).get("voice_mode", False))
+    system_parts = [SYSTEM_PROMPT, _reference_datetime_context()]
+    if voice_mode:
+        system_parts.append(VOICE_ADDENDUM)
+    if summary:
+        system_parts.append(f"Long-Term Memory (Summary of past events):\n{summary}")
+    system_parts.append(f"Adaptive feedback:\n{format_force_finalize_instruction()}")
+
+    system_msg = SystemMessage(content="\n\n".join(system_parts))
+    full_messages = [system_msg] + messages
+
+    # `llm` (unlike `llm_with_tools`) has no tools bound — it physically
+    # cannot emit a tool call, guaranteeing this node terminates the loop.
+    gathered = _stream_bound_llm(llm, full_messages, writer)
+    return {"messages": [gathered], "adaptive_feedback": ""}
+
+
+def route_after_tools(state: ChatState) -> Literal["adaptive_evaluator", "force_finalize", "chat_node"]:
+    """Router for the 'tools' node — the adaptive-loop trigger point.
+
+    Order matters: the hard tool-cycle budget is checked first (a safety
+    net that applies even when the loop is disabled would be surprising,
+    so it's gated behind adaptive_loop_enabled too), then the deterministic
+    evaluator trigger.
+    """
+    messages = state["messages"]
+    current_turn = get_current_turn_messages(messages)
+    loop_enabled = state.get("adaptive_loop_enabled", ADAPTIVE_LOOP_ENABLED_DEFAULT)
+
+    if not loop_enabled:
+        return "chat_node"
+
+    if should_force_finalize(current_turn):
+        return "force_finalize"
+
+    user_query = get_original_user_query(messages)
+    iteration = state.get("adaptive_iteration", 0)
+    if should_evaluate_after_tools(user_query, current_turn, iteration):
+        return "adaptive_evaluator"
+    return "chat_node"
 
 
 def _messages_to_plain_text(messages) -> str:
@@ -565,7 +736,15 @@ def should_summarize(state: ChatState) -> Literal["tools", "summarize_conversati
 
 # 5. GRAPH CONSTRUCTION
 
-conn = sqlite3.connect("chatbot.db", check_same_thread=False, timeout=30)
+# DATA_DIR lets deployments with an ephemeral container filesystem (e.g. a
+# free Hugging Face Space, which wipes non-repo files on every rebuild)
+# point chatbot.db at an attached persistent volume instead. Defaults to
+# the backend directory — unchanged behavior for local dev.
+_DATA_DIR = os.getenv("DATA_DIR", _BACKEND_DIR)
+os.makedirs(_DATA_DIR, exist_ok=True)
+_CHATBOT_DB_PATH = os.path.join(_DATA_DIR, "chatbot.db")
+
+conn = sqlite3.connect(_CHATBOT_DB_PATH, check_same_thread=False, timeout=30)
 configure_sqlite_connection(conn)
 checkpointer = SqliteSaver(conn=conn)
 checkpointer.setup()
@@ -574,11 +753,23 @@ graph = StateGraph(ChatState)
 
 graph.add_node("chat_node", chat_node)
 graph.add_node("tools", ToolNode(tools))
+graph.add_node("adaptive_evaluator", adaptive_evaluator_node)
+graph.add_node("force_finalize", force_finalize_node)
 graph.add_node("summarize_conversation", summarize_conversation)
 
 graph.add_edge(START, "chat_node")
 graph.add_conditional_edges("chat_node", should_summarize)
-graph.add_edge("tools", "chat_node")
+# Adaptive-loop trigger point: after tools run, either go straight back to
+# chat_node (ordinary single-step case — no unnecessary evaluator), into the
+# adaptive_evaluator when the deterministic trigger fires, or into
+# force_finalize once the hard tool-cycle budget is spent.
+graph.add_conditional_edges("tools", route_after_tools)
+# The evaluator never answers the user directly — it always routes back to
+# chat_node, which owns tool selection, generation, and streaming.
+graph.add_edge("adaptive_evaluator", "chat_node")
+# force_finalize's output never contains tool calls (unbound model), so the
+# same should_summarize router is safe to reuse here.
+graph.add_conditional_edges("force_finalize", should_summarize)
 graph.add_edge("summarize_conversation", END)
 
 chatbot = graph.compile(checkpointer=checkpointer)

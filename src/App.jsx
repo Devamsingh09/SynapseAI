@@ -5,6 +5,7 @@ import rehypeRaw from "rehype-raw";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { v4 as uuid } from "uuid";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import {
   createVoiceSession,
   extractNewSpeechChunks,
@@ -12,26 +13,43 @@ import {
   setActiveVoice,
 } from "./voiceChat";
 import { API_BASE } from "./apiConfig";
+import { AuthProvider, useAuth } from "./AuthContext";
+import { LoginPage, SignupPage, VerifyEmailPage, ForgotPasswordPage, ResetPasswordPage } from "./AuthPages";
 
 // ═══════════════════════════════════════════════════════
 // API
 // ═══════════════════════════════════════════════════════
 const BASE = API_BASE;
 
-const api = {
-  newThread:    ()    => fetch(`${BASE}/thread/new`, { method: "POST" }).then(r => r.json()).then(d => d.thread_id),
-  getThreads:   ()    => fetch(`${BASE}/threads`).then(r => r.json()).then(d => d.threads || []),
+// Labels for lightweight "typing" status indicators streamed from the
+// backend. `using_tools` already existed; `evaluating` / `refining` /
+// `finalizing` come from the adaptive agent loop (see backend/adaptive_loop.py)
+// — internal evaluator content itself is never streamed, only these status names.
+const TOOL_STATUS_LABELS = {
+  using_tools: "Searching the web & using tools…",
+  evaluating: "Checking the results…",
+  refining: "Refining the answer…",
+  finalizing: "Finalizing…",
+};
 
-  getHistory:   (tid) => fetch(`${BASE}/thread/${tid}/history`)
+const api = {
+  // credentials: "include" — every call to the protected backend needs to
+  // send the httpOnly session cookie set by /auth/login; without it every
+  // one of these would come back 401 once a thread/message/etc. is gated.
+  newThread:    ()    => fetch(`${BASE}/thread/new`, { method: "POST", credentials: "include" }).then(r => r.json()).then(d => d.thread_id),
+  getThreads:   ()    => fetch(`${BASE}/threads`, { credentials: "include" }).then(r => r.json()).then(d => d.threads || []),
+
+  getHistory:   (tid) => fetch(`${BASE}/thread/${tid}/history`, { credentials: "include" })
     .then(r => r.ok ? r.json() : { messages: [], title: "New Conversation" })
     .then(data => ({
       ...data,
       messages: data.messages || []
     })),
 
-  deleteThread: (tid) => fetch(`${BASE}/thread/${tid}`, { method: "DELETE" }),
+  deleteThread: (tid) => fetch(`${BASE}/thread/${tid}`, { method: "DELETE", credentials: "include" }),
   getSummary:   (txt) => fetch(`${BASE}/chat/summary`, {
     method: "POST",
+    credentials: "include",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text: txt })
   }).then(r => r.json()).then(d => d.title || "New Conversation"),
@@ -39,7 +57,7 @@ const api = {
   uploadFile: (file) => {
     const fd = new FormData();
     fd.append("file", file);
-    return fetch(`${BASE}/upload`, { method: "POST", body: fd }).then(async r => {
+    return fetch(`${BASE}/upload`, { method: "POST", credentials: "include", body: fd }).then(async r => {
       if (!r.ok) {
         const d = await r.json().catch(() => ({}));
         throw new Error(d.detail || `Upload failed (${r.status})`);
@@ -52,6 +70,7 @@ const api = {
     const { signal, voice = false } = options;
     const res = await fetch(`${BASE}/chat/stream`, {
       method: "POST",
+      credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ thread_id: threadId, message, voice }),
       signal,
@@ -88,6 +107,8 @@ const api = {
 // SIDEBAR
 // ═══════════════════════════════════════════════════════
 function Sidebar({ threads, titles, threadId, onNew, onLoad, onDelete, isOpen, onClose }) {
+  const { user, logout } = useAuth();
+
   return (
     <>
       <div className={`overlay ${isOpen ? "open" : ""}`} onClick={onClose} />
@@ -129,6 +150,13 @@ function Sidebar({ threads, titles, threadId, onNew, onLoad, onDelete, isOpen, o
             <p style={{ fontSize: 12, color: "var(--text-dim)", padding: "10px 8px" }}>No conversations yet</p>
           )}
         </nav>
+
+        {user && (
+          <div className="topbar-user">
+            <span className="topbar-user-email" title={user.email}>{user.email}</span>
+            <button className="topbar-logout-btn" onClick={logout}>Log out</button>
+          </div>
+        )}
       </aside>
     </>
   );
@@ -316,7 +344,7 @@ function InputBar({
 // ═══════════════════════════════════════════════════════
 // ROOT APP
 // ═══════════════════════════════════════════════════════
-export default function App() {
+function ChatApp() {
   const [threadId,    setThreadId]    = useState(uuid);
   const [messages,    setMessages]    = useState([]);
   const [threads,     setThreads]     = useState([]);
@@ -503,9 +531,12 @@ export default function App() {
           }
         },
         status => {
-          if (status === "using_tools") {
-            setToolStatus("using_tools");
-            if (fromVoice) voiceRef.current?.speakStatus("One moment.");
+          // Adaptive-loop statuses (evaluating/refining/finalizing) reuse the
+          // same lightweight "typing label" UI as using_tools — no new panel,
+          // just a different label while no answer text has streamed yet.
+          if (status === "using_tools" || status === "evaluating" || status === "refining" || status === "finalizing") {
+            setToolStatus(status);
+            if (fromVoice && status === "using_tools") voiceRef.current?.speakStatus("One moment.");
           }
         },
         { signal, voice: fromVoice }
@@ -616,10 +647,10 @@ export default function App() {
           : <div className="messages">
               {messages.map((m, i) => <Message key={i} role={m.role} content={m.content} attachmentName={m.attachmentName} />)}
               {streaming && streamMsg  && <Message role="assistant" content={streamMsg} streaming />}
-              {streaming && !streamMsg && toolStatus === "using_tools" && (
-                <Typing label="Searching the web & using tools…" />
+              {streaming && !streamMsg && TOOL_STATUS_LABELS[toolStatus] && (
+                <Typing label={TOOL_STATUS_LABELS[toolStatus]} />
               )}
-              {streaming && !streamMsg && toolStatus !== "using_tools" && <Typing />}
+              {streaming && !streamMsg && !TOOL_STATUS_LABELS[toolStatus] && <Typing />}
               {voiceError && (
                 <div className="voice-error-banner">{voiceError}</div>
               )}
@@ -656,5 +687,39 @@ export default function App() {
         />
       </main>
     </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
+// AUTH GATE + ROUTING
+// ═══════════════════════════════════════════════════════
+function ProtectedRoute({ children }) {
+  const { isAuthenticated, loading } = useAuth();
+  if (loading) return <div className="auth-loading-screen">Loading…</div>;
+  if (!isAuthenticated) return <Navigate to="/login" replace />;
+  return children;
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <AuthProvider>
+        <Routes>
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/signup" element={<SignupPage />} />
+          <Route path="/verify-email" element={<VerifyEmailPage />} />
+          <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+          <Route path="/reset-password" element={<ResetPasswordPage />} />
+          <Route
+            path="/*"
+            element={
+              <ProtectedRoute>
+                <ChatApp />
+              </ProtectedRoute>
+            }
+          />
+        </Routes>
+      </AuthProvider>
+    </BrowserRouter>
   );
 }
