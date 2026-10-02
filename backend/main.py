@@ -56,6 +56,10 @@ app = FastAPI(title="Synapse AI API", version="1.1.0", lifespan=lifespan)
 # cross-origin when the server allows "*" with credentials — so this must be
 # an explicit origin list rather than a wildcard once login exists.
 _FRONTEND_ORIGINS = [o.strip() for o in auth.FRONTEND_ORIGIN.split(",") if o.strip()]
+# Temporary startup diagnostic — not a secret (it's a URL, not a key) — to
+# verify what this running process actually resolved FRONTEND_ORIGIN to,
+# since CORS behavior in production wasn't matching what was configured.
+print(f"[startup] FRONTEND_ORIGIN raw={auth.FRONTEND_ORIGIN!r} parsed={_FRONTEND_ORIGINS!r}", flush=True)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_FRONTEND_ORIGINS,
@@ -197,6 +201,10 @@ async def health():
     return {
         "ok": groq_ok,
         "groq_configured": groq_ok,
+        # Temporary diagnostic — not a secret, just the parsed CORS allow-list —
+        # to verify FRONTEND_ORIGIN actually resolves as configured in prod.
+        "frontend_origins_configured": _FRONTEND_ORIGINS,
+        "resend_configured": bool(email_service.RESEND_API_KEY),
         **stats,
     }
 
