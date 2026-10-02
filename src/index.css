@@ -241,6 +241,13 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* clip, not hidden: the ambient glow blobs overflow this box, and an
+     overflow:hidden box is still programmatically scrollable — the
+     auto-scroll-to-latest-message (scrollIntoView) was scrolling .main
+     itself by the glow's overflow, lifting the input bar off the bottom.
+     clip paints identically but can never scroll. hidden stays as the
+     fallback for browsers without clip support. */
+  overflow: clip;
   position: relative;
   background: var(--bg);
   /* grid texture */
@@ -691,7 +698,11 @@ body {
    part of the same product rather than a bolted-on form page. */
 .auth-screen::before, .auth-screen::after {
   content: '';
-  position: absolute;
+  /* fixed, not absolute: .auth-screen must stay scrollable on short phones,
+     and absolutely-positioned glows overflowing it were adding phantom
+     vertical scroll plus a horizontal scrollbar. Fixed boxes never extend
+     a scroll container's scrollable area. */
+  position: fixed;
   pointer-events: none;
   z-index: -1;
   border-radius: 50%;
