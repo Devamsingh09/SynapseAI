@@ -106,6 +106,11 @@ body {
   font-size: 18px;
   box-shadow: 0 0 20px rgba(0,212,255,0.2), inset 0 1px 0 rgba(255,255,255,0.05);
   flex-shrink: 0;
+  animation: orb-breathe 4s ease-in-out infinite;
+}
+@keyframes orb-breathe {
+  0%, 100% { box-shadow: 0 0 20px rgba(0,212,255,0.2), inset 0 1px 0 rgba(255,255,255,0.05); }
+  50%      { box-shadow: 0 0 28px rgba(0,212,255,0.38), inset 0 1px 0 rgba(255,255,255,0.08); }
 }
 
 .logo-name {
@@ -147,6 +152,7 @@ body {
   color: var(--cyan);
   box-shadow: 0 0 16px var(--cyan-glow);
 }
+.btn-new:active { transform: scale(0.98); }
 .btn-new svg { transition: transform var(--ease); }
 .btn-new:hover svg { transform: rotate(90deg); }
 
@@ -244,15 +250,45 @@ body {
   background-size: 40px 40px;
 }
 
-/* top glow */
-.main::before {
+/* Ambient glow — alive, drifting background that responds to conversation
+   state (Gemini-style "the interface moves with cognitive load"). Two
+   layered blobs drift slowly; intensity rises while a reply is streaming. */
+.main::before, .main::after {
   content: '';
   position: absolute;
-  top: -80px; left: 50%; transform: translateX(-50%);
-  width: 600px; height: 200px;
-  background: radial-gradient(ellipse, rgba(0,212,255,0.07) 0%, transparent 70%);
   pointer-events: none;
+  z-index: 0;
+  border-radius: 50%;
+  filter: blur(10px);
+  transition: opacity 0.6s ease;
 }
+.main::before {
+  top: -120px; left: 18%;
+  width: 560px; height: 560px;
+  background: radial-gradient(circle, rgba(0,212,255,0.10) 0%, transparent 70%);
+  animation: glow-drift-a 22s ease-in-out infinite;
+  opacity: 0.8;
+}
+.main::after {
+  bottom: -160px; right: 12%;
+  width: 480px; height: 480px;
+  background: radial-gradient(circle, rgba(0,153,204,0.08) 0%, transparent 70%);
+  animation: glow-drift-b 26s ease-in-out infinite;
+  opacity: 0.6;
+}
+.main.is-streaming::before { opacity: 1; animation-duration: 9s; }
+.main.is-streaming::after { opacity: 0.85; animation-duration: 11s; }
+
+@keyframes glow-drift-a {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50%      { transform: translate(40px, 30px) scale(1.12); }
+}
+@keyframes glow-drift-b {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50%      { transform: translate(-30px, -25px) scale(1.08); }
+}
+
+.main > * { position: relative; z-index: 1; }
 
 /* hamburger (mobile) */
 .hamburger {
@@ -464,15 +500,24 @@ body {
   max-width: 800px; margin: 0 auto;
   background: var(--bg-input);
   border: 1px solid var(--border-light);
-  border-radius: var(--r-xl);
+  border-radius: 28px;
   display: flex; align-items: flex-end;
-  padding: 12px 12px 12px 18px;
-  transition: border-color var(--ease), box-shadow var(--ease);
+  padding: 12px 12px 12px 20px;
+  transition: border-color var(--ease), box-shadow var(--ease), transform var(--ease);
   position: relative;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.25);
 }
 .input-shell:focus-within {
   border-color: var(--cyan);
   box-shadow: 0 0 0 3px var(--cyan-dim), 0 8px 30px rgba(0,0,0,0.4);
+}
+.input-shell.is-busy {
+  border-color: rgba(0, 212, 255, 0.4);
+  animation: input-breathe 2.4s ease-in-out infinite;
+}
+@keyframes input-breathe {
+  0%, 100% { box-shadow: 0 0 0 0 var(--cyan-dim), 0 4px 20px rgba(0,0,0,0.25); }
+  50%      { box-shadow: 0 0 0 4px rgba(0,212,255,0.08), 0 4px 24px rgba(0,0,0,0.3); }
 }
 
 .input-field {
@@ -490,6 +535,7 @@ body {
   transition: all var(--ease);
 }
 .send-btn:hover:not(:disabled) { transform: scale(1.1); box-shadow: 0 0 20px var(--cyan-glow); }
+.send-btn:active:not(:disabled) { transform: scale(0.95); }
 .send-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 
 .input-hint { text-align:center; font-size:11px; color:var(--text-dim); margin-top:8px; }
@@ -637,6 +683,31 @@ body {
   display: flex; align-items: center; justify-content: center;
   background: var(--bg);
   padding: 24px;
+  position: relative;
+  isolation: isolate;
+}
+
+/* Same ambient-glow language as the chat app, so login/signup feels like
+   part of the same product rather than a bolted-on form page. */
+.auth-screen::before, .auth-screen::after {
+  content: '';
+  position: absolute;
+  pointer-events: none;
+  z-index: -1;
+  border-radius: 50%;
+  filter: blur(10px);
+}
+.auth-screen::before {
+  top: -10%; left: -8%;
+  width: 46vw; height: 46vw; max-width: 560px; max-height: 560px;
+  background: radial-gradient(circle, rgba(0,212,255,0.12) 0%, transparent 70%);
+  animation: glow-drift-a 22s ease-in-out infinite;
+}
+.auth-screen::after {
+  bottom: -14%; right: -6%;
+  width: 40vw; height: 40vw; max-width: 480px; max-height: 480px;
+  background: radial-gradient(circle, rgba(0,153,204,0.10) 0%, transparent 70%);
+  animation: glow-drift-b 26s ease-in-out infinite;
 }
 
 .auth-card {
@@ -645,7 +716,17 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--r-xl);
   padding: 36px 32px;
-  box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+  box-shadow: 0 20px 60px rgba(0,0,0,0.45), 0 0 0 1px rgba(0,212,255,0.04);
+  animation: msg-in 0.35s ease forwards;
+  position: relative;
+  overflow: hidden;
+}
+/* subtle accent line across the top edge — a quiet brand touch */
+.auth-card::before {
+  content: '';
+  position: absolute; top: 0; left: 0; right: 0; height: 2px;
+  background: linear-gradient(90deg, transparent, var(--cyan), transparent);
+  opacity: 0.6;
 }
 
 .auth-logo {
@@ -671,9 +752,13 @@ body {
   font-size: 14px;
   color: var(--text);
   font-family: var(--font);
-  transition: border-color var(--ease);
+  transition: border-color var(--ease), box-shadow var(--ease);
 }
-.auth-input:focus { outline: none; border-color: var(--cyan-2); }
+.auth-input:focus {
+  outline: none;
+  border-color: var(--cyan);
+  box-shadow: 0 0 0 3px var(--cyan-dim);
+}
 
 .auth-hint { font-size: 12px; color: var(--text-dim); margin-top: -8px; }
 
@@ -696,7 +781,7 @@ body {
 }
 
 .auth-submit {
-  background: var(--cyan-2);
+  background: linear-gradient(135deg, var(--cyan), var(--cyan-2));
   color: #04111a;
   font-weight: 600;
   font-size: 14px;
@@ -704,9 +789,10 @@ body {
   border-radius: var(--r);
   padding: 12px;
   cursor: pointer;
-  transition: background var(--ease), opacity var(--ease);
+  transition: transform var(--ease), box-shadow var(--ease), opacity var(--ease);
 }
-.auth-submit:hover:not(:disabled) { background: var(--cyan); }
+.auth-submit:hover:not(:disabled) { box-shadow: 0 6px 24px var(--cyan-glow); transform: translateY(-1px); }
+.auth-submit:active:not(:disabled) { transform: translateY(0) scale(0.99); }
 .auth-submit:disabled { opacity: 0.6; cursor: not-allowed; }
 
 .auth-links {

@@ -18,6 +18,7 @@ VOICE_OPTIONS = [
     {"id": "en-IN-NeerjaNeural", "label": "Neerja (India, female)"},
     {"id": "en-IN-PrabhatNeural", "label": "Prabhat (India, male)"},
     {"id": "hi-IN-SwaraNeural", "label": "Swara (Hindi, female)"},
+    {"id": "hi-IN-MadhurNeural", "label": "Madhur (Hindi, male)"},
 ]
 
 # Hard cap per TTS request (Edge TTS handles long text but we chunk on client too)

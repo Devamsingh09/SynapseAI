@@ -287,7 +287,7 @@ function InputBar({
       )}
       {uploading && <div className="attachment-chip attachment-loading">Reading file…</div>}
       {uploadError && <div className="file-error-banner">{uploadError}</div>}
-      <div className={`input-shell ${voiceMode ? "voice-active" : ""}`}>
+      <div className={`input-shell ${voiceMode ? "voice-active" : ""} ${disabled ? "is-busy" : ""}`}>
         <input
           type="file"
           ref={fileInputRef}
@@ -641,7 +641,7 @@ function ChatApp() {
         onClose={() => setSidebarOpen(false)}
       />
 
-      <main className="main">
+      <main className={`main${streaming ? " is-streaming" : ""}`}>
         {showHero
           ? <Hero onPrompt={send} />
           : <div className="messages">
