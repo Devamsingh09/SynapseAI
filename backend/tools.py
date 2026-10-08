@@ -9,6 +9,8 @@ from langchain_community.vectorstores import FAISS
 from langchain_core.tools import tool
 from tavily import TavilyClient
 
+import web_search_service
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FAISS_DIR = os.path.join(BASE_DIR, "faiss_ethics_ch10")
 
@@ -19,6 +21,10 @@ _vector_store = FAISS.load_local(
     allow_dangerous_deserialization=True,
 )
 _retriever = _vector_store.as_retriever(search_kwargs={"k": 4})
+# web_search reuses the same MiniLM model to score result passages — no second model load.
+_web_search_scorer = web_search_service.make_hybrid_scorer(
+    web_search_service.make_minilm_similarity(_embeddings)
+)
 def get_embeddings():
     """Expose the already-loaded embeddings model for reuse elsewhere (tool routing)."""
     return _embeddings
@@ -54,30 +60,11 @@ def rag_tool(query: str) -> str:
 @tool
 def web_search(query: str) -> str:
     """Search the web via Tavily for up-to-date information. Use for current office holders, news, sports, commodities (silver/gold), and any fact that may have changed. Include the current year in the query."""
+    # Cleaning, passage-level relevance filtering, dedupe, date labels and
+    # caching all live in web_search_service — see its module docstring.
     try:
-        client = _tavily_client()
-        response = client.search(
-            query=query,
-            max_results=3,
-            include_answer=True,
-        )
-
-        parts = []
-        answer = response.get("answer")
-        if answer:
-            parts.append(f"Summary: {answer[:500]}")  # cap the summary itself
-
-        results = response.get("results") or []
-        for i, hit in enumerate(results, 1):
-            title = hit.get("title", "")
-            content = (hit.get("content", "") or "")[:350]  # cap per-result content
-            url = hit.get("url", "")
-            parts.append(f"{i}. {title}\n{content}\nSource: {url}")
-
-        if not parts:
-            return "No web results found."
-        combined = "\n\n".join(parts)
-        return combined[:1800]  # hard cap on total tool-result size
+        client = web_search_service.thread_client(_tavily_client)
+        return web_search_service.run_web_search(query, client, _web_search_scorer)
     except Exception as e:
         return f"Web search failed: {type(e).__name__}: {e}"
 
