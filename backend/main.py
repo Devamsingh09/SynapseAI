@@ -10,6 +10,7 @@ from langchain_core.messages import HumanMessage, AIMessage
 import uuid
 import json
 import asyncio
+import threading
 
 import auth
 import email_service
@@ -77,6 +78,10 @@ class ChatRequest(BaseModel):
 
 class SummaryRequest(BaseModel):
     text: str
+
+
+class StopRequest(BaseModel):
+    thread_id: str
 
 
 class TtsRequest(BaseModel):
@@ -160,16 +165,21 @@ def _delete_thread(thread_id: str) -> dict:
     return {"deleted": thread_id}
 
 
+# Most recent /chat/stream request per thread → its stop Event, for /chat/stop.
+_stop_events: dict[str, threading.Event] = {}
+
+
 def _graph_worker(
     message: str,
     thread_id: str,
     voice: bool,
     loop: asyncio.AbstractEventLoop,
     queue: asyncio.Queue,
+    stop_event: threading.Event,
 ) -> None:
     """Runs in thread pool; pushes stream events onto the async queue."""
     try:
-        for event in iter_chat_stream(message, thread_id, voice=voice):
+        for event in iter_chat_stream(message, thread_id, voice=voice, stop_event=stop_event):
             loop.call_soon_threadsafe(queue.put_nowait, event)
     except Exception as exc:
         loop.call_soon_threadsafe(queue.put_nowait, ("error", str(exc)))
@@ -404,6 +414,18 @@ async def summarize(req: SummaryRequest, current_user: auth.User = Depends(auth.
     return {"title": title}
 
 
+@app.post("/chat/stop")
+async def chat_stop(req: StopRequest, current_user: auth.User = Depends(auth.get_current_user)):
+    """Stop the answer currently being generated on this thread. The text
+    produced so far is kept as the assistant's reply. Idempotent."""
+    if auth.get_thread_owner(req.thread_id) != current_user.id:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    event = _stop_events.get(req.thread_id)
+    if event:
+        event.set()
+    return {"stopped": bool(event)}
+
+
 @app.post("/chat/stream")
 async def chat_stream(req: ChatRequest, current_user: auth.User = Depends(auth.get_current_user)):
     """
@@ -420,6 +442,9 @@ async def chat_stream(req: ChatRequest, current_user: auth.User = Depends(auth.g
     elif owner_id != current_user.id:
         raise HTTPException(status_code=404, detail="Thread not found")
 
+    stop_event = threading.Event()
+    _stop_events[req.thread_id] = stop_event
+
     async def event_generator():
         async with chat_slot():
             loop = asyncio.get_running_loop()
@@ -432,6 +457,7 @@ async def chat_stream(req: ChatRequest, current_user: auth.User = Depends(auth.g
                 req.voice,
                 loop,
                 queue,
+                stop_event,
             )
 
             try:
@@ -460,8 +486,15 @@ async def chat_stream(req: ChatRequest, current_user: auth.User = Depends(auth.g
                     if kind == "token":
                         yield f"data: {json.dumps({'token': payload})}\n\n"
 
+            except (asyncio.CancelledError, GeneratorExit):
+                # Client went away (Stop pressed, tab closed): stop the graph
+                # too instead of letting it run to completion unseen.
+                stop_event.set()
+                raise
             finally:
                 await worker
+                if _stop_events.get(req.thread_id) is stop_event:
+                    del _stop_events[req.thread_id]
 
     return StreamingResponse(
         event_generator(),

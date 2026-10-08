@@ -131,6 +131,7 @@ SYSTEM_PROMPT = """You are Synapse AI — a helpful, accurate assistant (a focus
 - Prefer headers and bullet points over markdown tables for structured/comparative info — tables render unreliably in this chat UI. If a table is truly necessary, put every row on its own line (a real line break after each row) — never combine multiple rows onto one line.
 - If you are unsure, say so. Do not invent live data (prices, news, dates, document quotes).
 - After using tools, always give a final natural-language answer — never stop at raw tool output.
+- Never write citation markers such as 【3†L1-L4】, 【turn0search1】, [1†source] or bare [1]/[2] reference numbers — they mean nothing to the user. If a source matters, name it in plain words (e.g. "according to Wikipedia") or give its URL.
 - A reference date/time for today is provided below — use that year in search queries. Do NOT call current_datetime unless the user explicitly asks for the time or date.
 - Whenever someone asks who made you , just reply Devam Singh is the AI//ML Engineer who made you graduated from IIIT Ranchi (DSAI) branch (2026-Batch), Do not mention OpenAI or something because OpenAI provided only LLM API. You can visit his portfolio and github and linkedin, their respective links are - 'https://ai-portfolio-mu-one.vercel.app/', 'https://github.com/Devamsingh09', 'https://www.linkedin.com/in/devam-singh-248025265/'.
 - Never Omit internal tools names and working only you can talk about your core capabilitites, not how it is coming.
@@ -249,6 +250,24 @@ def get_thread_lock(thread_id: str) -> threading.Lock:
         return _thread_locks[thread_id]
 
 
+# ── Stop generation ──────────────────────────────────────────────────────────
+# The run currently holding a thread's lock registers its stop Event here, so
+# graph nodes can look it up by thread_id from their config. Cancellation is
+# cooperative: the streaming LLM loop checks it per chunk (covers the model's
+# "thinking" phase too) and nodes that start after a stop do nothing, so the
+# graph still ends cleanly and the checkpoint stays valid. A tool that is
+# already executing finishes, but nothing runs after it.
+_active_stop_events: dict[str, threading.Event] = {}
+_active_stop_guard = threading.Lock()
+
+
+def _stop_requested(config: Optional[RunnableConfig]) -> bool:
+    thread_id = str((config or {}).get("configurable", {}).get("thread_id", ""))
+    with _active_stop_guard:
+        event = _active_stop_events.get(thread_id)
+    return bool(event and event.is_set())
+
+
 def configure_sqlite_connection(conn: sqlite3.Connection) -> None:
     """Improve concurrent read/write behaviour under parallel requests."""
     conn.execute("PRAGMA journal_mode=WAL")
@@ -267,13 +286,16 @@ def _unpack_stream_event(event) -> Tuple[str, object]:
 
 
 def iter_chat_stream(
-    message: str, thread_id: str, voice: bool = False
+    message: str, thread_id: str, voice: bool = False, stop_event: Optional[threading.Event] = None
 ) -> Iterator[Tuple[str, object]]:
     """
     Sync generator of SSE-oriented events: ('token', str), ('status', str), ('done', None), ('error', str).
     Tokens are streamed live from Groq via LangGraph custom stream mode.
     voice=True adds concise spoken-response instructions (same graph, tools, and thread state).
+    stop_event: set it to stop this turn early (user pressed Stop / disconnected);
+    whatever text was generated so far is kept as the assistant's reply.
     """
+    stop_event = stop_event or threading.Event()
     config = {
         "configurable": {"thread_id": thread_id, "voice_mode": voice},
         # Top-level (not "configurable") — a safety ceiling on total graph
@@ -283,7 +305,12 @@ def iter_chat_stream(
     }
     lock = get_thread_lock(thread_id)
     with lock:
+        with _active_stop_guard:
+            _active_stop_events[thread_id] = stop_event
         try:
+            if stop_event.is_set():  # stopped while waiting for the previous turn
+                yield ("done", None)
+                return
             graph_input = {
                 "messages": [HumanMessage(content=message)],
                 # Reset per-turn adaptive state on every new user message so
@@ -305,7 +332,10 @@ def iter_chat_stream(
                     if isinstance(payload, dict):
                         token = payload.get("token")
                         if token:
-                            yield ("token", token)
+                            # After Stop the graph is only winding down — the
+                            # client already has what it showed.
+                            if not stop_event.is_set():
+                                yield ("token", token)
                             continue
                         status = payload.get("status")
                         if status:
@@ -330,6 +360,10 @@ def iter_chat_stream(
             # for the whole turn (adaptive loop included) can sit unwritten.
             print(f"[chat_stream error] thread={thread_id}: {type(exc).__name__}: {exc}", flush=True)
             yield ("error", "Something went wrong on my end. Please try again in a moment.")
+        finally:
+            with _active_stop_guard:
+                if _active_stop_events.get(thread_id) is stop_event:
+                    del _active_stop_events[thread_id]
 
 
 def _is_groq_tool_failure(exc: Exception) -> bool:
@@ -469,10 +503,22 @@ def _emit_text_to_writer(text: str, writer) -> None:
         writer({"token": text})
 
 
-def _stream_bound_llm(bound_llm, messages, writer) -> AIMessage:
-    """Stream tokens from Groq; return the assembled AIMessage."""
+def _stopped_reply(gathered) -> AIMessage:
+    """What a stopped generation leaves in history: the text produced so far,
+    never a half-streamed tool call (an unanswered tool_call breaks the next
+    Groq request)."""
+    text = extract_ai_text(getattr(gathered, "content", "")) if gathered is not None else ""
+    return AIMessage(content=text, id=getattr(gathered, "id", None))
+
+
+def _stream_bound_llm(bound_llm, messages, writer, should_stop=None) -> AIMessage:
+    """Stream tokens from Groq; return the assembled AIMessage.
+    should_stop() is checked per chunk — breaking out closes the Groq stream,
+    so a stopped answer stops costing tokens immediately."""
     gathered = None
     for chunk in bound_llm.stream(messages):
+        if should_stop and should_stop():
+            return _stopped_reply(gathered)
         gathered = chunk if gathered is None else gathered + chunk
         if getattr(chunk, "tool_call_chunks", None) or getattr(chunk, "tool_calls", None):
             continue
@@ -486,15 +532,18 @@ def _stream_bound_llm(bound_llm, messages, writer) -> AIMessage:
     return _sanitize_ai_response(result)
 
 
-def _invoke_bound_llm(bound_llm, messages, writer) -> AIMessage:
-    """Non-stream invoke — more reliable for tool calls on Groq Llama."""
+def _invoke_bound_llm(bound_llm, messages, writer, should_stop=None) -> AIMessage:
+    """Non-stream invoke — more reliable for tool calls on Groq Llama.
+    Can't be interrupted mid-call; a Stop during it discards any tool calls."""
     response = _sanitize_ai_response(bound_llm.invoke(messages))
+    if should_stop and should_stop():
+        return _stopped_reply(response)
     if not (getattr(response, "tool_calls", None) or []):
         _emit_text_to_writer(extract_ai_text(response.content), writer)
     return response
 
 
-def _run_chat_llm(messages, writer) -> AIMessage:
+def _run_chat_llm(messages, writer, should_stop=None) -> AIMessage:
     """
     Run chat with tools. Invoke-first for reliable tool JSON on Groq Llama.
     Streaming is fallback only — avoids narrating XML tool calls as the answer.
@@ -510,8 +559,10 @@ def _run_chat_llm(messages, writer) -> AIMessage:
         if invoke_llm is None or stream_llm is None:
             continue
         for runner, bound in ((_stream_bound_llm, stream_llm), (_invoke_bound_llm, invoke_llm)):
+            if should_stop and should_stop():  # e.g. stopped during a failed first attempt
+                return AIMessage(content="")
             try:
-                return runner(bound, messages, writer)
+                return runner(bound, messages, writer, should_stop=should_stop)
             except Exception as exc:
                 last_error = exc
                 if not _is_groq_tool_failure(exc):
@@ -522,6 +573,8 @@ def _run_chat_llm(messages, writer) -> AIMessage:
 
 def chat_node(state: ChatState, config: RunnableConfig):
     """Main Chat Node — streams Groq tokens to the client while building the final AIMessage."""
+    if _stop_requested(config):
+        return {"messages": []}
     summary = state.get("summary", "")
     messages = state["messages"]
     adaptive_feedback = state.get("adaptive_feedback", "")
@@ -543,13 +596,17 @@ def chat_node(state: ChatState, config: RunnableConfig):
         # A second (or later) pass informed by the evaluator — let the UI
         # show "refining" instead of the generic typing indicator.
         writer({"status": "refining"})
-    gathered = _run_chat_llm(messages, writer)
+    gathered = _run_chat_llm(messages, writer, should_stop=lambda: _stop_requested(config))
+    if _stop_requested(config) and not extract_ai_text(gathered.content).strip():
+        return {"messages": []}  # stopped before any answer text: save nothing
     return {"messages": [gathered]}
 
 
 def adaptive_evaluator_node(state: ChatState, config: RunnableConfig):
     """Judge whether this turn's tool evidence satisfies the ORIGINAL user
     request. Never streams to the user; failures fall back to normal chat."""
+    if _stop_requested(config):
+        return {"adaptive_feedback": ""}
     writer = get_stream_writer()
     if writer:
         writer({"status": "evaluating"})
@@ -583,6 +640,8 @@ def adaptive_evaluator_node(state: ChatState, config: RunnableConfig):
 def force_finalize_node(state: ChatState, config: RunnableConfig):
     """Hard tool-cycle budget reached — synthesize a final answer WITHOUT
     calling more tools, using the same primary model but unbound from tools."""
+    if _stop_requested(config):
+        return {"adaptive_feedback": ""}
     writer = get_stream_writer()
     if writer:
         writer({"status": "finalizing"})
@@ -603,7 +662,9 @@ def force_finalize_node(state: ChatState, config: RunnableConfig):
 
     # `llm` (unlike `llm_with_tools`) has no tools bound — it physically
     # cannot emit a tool call, guaranteeing this node terminates the loop.
-    gathered = _stream_bound_llm(llm, full_messages, writer)
+    gathered = _stream_bound_llm(llm, full_messages, writer, should_stop=lambda: _stop_requested(config))
+    if _stop_requested(config) and not extract_ai_text(gathered.content).strip():
+        return {"adaptive_feedback": ""}
     return {"messages": [gathered], "adaptive_feedback": ""}
 
 
@@ -681,10 +742,12 @@ def _split_by_char_budget(messages, budget: int):
     return messages[:cutoff], kept
 
 
-def summarize_conversation(state: ChatState):
+def summarize_conversation(state: ChatState, config: RunnableConfig):
     """Compresses old messages into a summary. Only runs once a turn has fully
     completed (see should_summarize) — never mid-tool-loop."""
     summary = state.get("summary", "")
+    if _stop_requested(config):  # a stopped turn ends now; summarize after the next one
+        return {"summary": summary}
     messages = state["messages"]
 
     messages_to_summarize, _kept_raw = _split_by_char_budget(messages, _RAW_WINDOW_CHAR_BUDGET)

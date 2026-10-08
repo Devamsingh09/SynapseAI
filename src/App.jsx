@@ -47,6 +47,12 @@ const api = {
     })),
 
   deleteThread: (tid) => fetch(`${BASE}/thread/${tid}`, { method: "DELETE", credentials: "include" }),
+  stopChat:     (tid) => fetch(`${BASE}/chat/stop`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ thread_id: tid }),
+  }),
   getSummary:   (txt) => fetch(`${BASE}/chat/summary`, {
     method: "POST",
     credentials: "include",
@@ -104,6 +110,69 @@ const api = {
 };
 
 // ═══════════════════════════════════════════════════════
+// ACCOUNT MENU (sidebar footer)
+// ═══════════════════════════════════════════════════════
+// Log out sits one click behind the account row (as in ChatGPT) so a stray
+// click can't end the session. Closes on outside click or Escape.
+function AccountMenu({ email, onLogout }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const rootRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointer = e => { if (!rootRef.current?.contains(e.target)) setOpen(false); };
+    const onKey = e => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", onPointer);
+    document.addEventListener("touchstart", onPointer);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onPointer);
+      document.removeEventListener("touchstart", onPointer);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const handleLogout = async () => {
+    setBusy(true);
+    // logout() always clears the session locally (even if the request fails),
+    // and the auth gate then redirects to /login — this component unmounts.
+    try { await onLogout(); } catch { setBusy(false); }
+  };
+
+  return (
+    <div className="account" ref={rootRef}>
+      {open && (
+        <div className="account-menu" role="menu">
+          <div className="account-menu-label">Signed in as</div>
+          <div className="account-menu-email" title={email}>{email}</div>
+          <div className="account-menu-sep" />
+          <button className="account-menu-item danger" role="menuitem" onClick={handleLogout} disabled={busy} autoFocus>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><polyline points="16 17 21 12 16 7" /><line x1="21" y1="12" x2="9" y2="12" />
+            </svg>
+            {busy ? "Logging out…" : "Log out"}
+          </button>
+        </div>
+      )}
+      <button
+        className={`account-trigger ${open ? "open" : ""}`}
+        onClick={() => setOpen(o => !o)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={email}
+      >
+        <span className="account-avatar">{(email || "?")[0].toUpperCase()}</span>
+        <span className="account-email">{email}</span>
+        <svg className="account-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="18 15 12 9 6 15" />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
 // SIDEBAR
 // ═══════════════════════════════════════════════════════
 function Sidebar({ threads, titles, threadId, onNew, onLoad, onDelete, isOpen, onClose }) {
@@ -151,12 +220,7 @@ function Sidebar({ threads, titles, threadId, onNew, onLoad, onDelete, isOpen, o
           )}
         </nav>
 
-        {user && (
-          <div className="topbar-user">
-            <span className="topbar-user-email" title={user.email}>{user.email}</span>
-            <button className="topbar-logout-btn" onClick={logout}>Log out</button>
-          </div>
-        )}
+        {user && <AccountMenu email={user.email} onLogout={logout} />}
       </aside>
     </>
   );
@@ -196,17 +260,28 @@ function Hero({ onPrompt }) {
 // ═══════════════════════════════════════════════════════
 // MESSAGE
 // ═══════════════════════════════════════════════════════
-function CodeBlock({ inline, className, children, ...props }) {
+function renderCode({ inline, className, children, ...props }, plain) {
   const match = /language-(\w+)/.exec(className || "");
   return !inline && match
-    ? <SyntaxHighlighter style={oneDark} language={match[1]} PreTag="div"
+    ? <SyntaxHighlighter style={oneDark} language={plain ? "text" : match[1]} PreTag="div"
         customStyle={{ background: "#04070d", border: "1px solid #1c2a3a", borderRadius: "10px", fontSize: "13px", margin: "10px 0" }} {...props}>
         {String(children).replace(/\n$/, "")}
       </SyntaxHighlighter>
     : <code className={className} {...props}>{children}</code>;
 }
+const CodeBlock = props => renderCode(props, false);
+// While an answer streams, code renders as "text" (no Prism tokenizing).
+// Re-highlighting the whole growing block on every frame blocked the main
+// thread for nearly the entire stream, which is what made scrolling lurch.
+// Same box, font and size, so nothing shifts when the colours appear at the end.
+const StreamingCodeBlock = props => renderCode(props, true);
+const MARKDOWN_COMPONENTS = { code: CodeBlock };
+const STREAMING_MARKDOWN_COMPONENTS = { code: StreamingCodeBlock };
 
-function Message({ role, content, streaming, attachmentName }) {
+// memo: while an answer streams, ChatApp re-renders every frame — without
+// this, every earlier message re-parsed its markdown and re-highlighted its
+// code each time, so long chats with code got slower and choppier.
+const Message = React.memo(function Message({ role, content, streaming, attachmentName }) {
   const isUser = role === "user";
   return (
     <div className={`msg ${isUser ? "msg-user" : "msg-ai"}`}>
@@ -215,12 +290,12 @@ function Message({ role, content, streaming, attachmentName }) {
         {attachmentName && <div className="msg-attachment">📎 {attachmentName}</div>}
         {isUser
           ? <span style={{ whiteSpace: "pre-wrap" }}>{content}</span>
-          : <><ReactMarkdown components={{ code: CodeBlock }}>{content}</ReactMarkdown>{streaming && <span className="cursor" />}</>
+          : <><ReactMarkdown components={streaming ? STREAMING_MARKDOWN_COMPONENTS : MARKDOWN_COMPONENTS}>{content}</ReactMarkdown>{streaming && <span className="cursor" />}</>
         }
       </div>
     </div>
   );
-}
+});
 
 function Typing({ label }) {
   return (
@@ -269,6 +344,7 @@ function InputBar({
   onVoiceToggle, inputRef,
   attachment, uploading, uploadError,
   onAttachClick, onRemoveAttachment, fileInputRef, onFileSelect,
+  onStop,
 }) {
   const ref = inputRef || useRef(null);
   useEffect(() => {
@@ -329,12 +405,16 @@ function InputBar({
           onChange={e => onChange(e.target.value)}
           onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } }}
         />
-        <button className="send-btn" onClick={submit} disabled={!canSend}>
-          {disabled
-            ? <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: "spin 0.9s linear infinite" }}><path d="M21 12a9 9 0 1 1-6.219-8.56" /><style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style></svg>
-            : <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
-          }
-        </button>
+        {disabled
+          // While an answer is generating (or the model is still thinking /
+          // using tools) the send button becomes Stop, as in ChatGPT.
+          ? <button type="button" className="send-btn stop-btn" onClick={onStop} title="Stop generating" aria-label="Stop generating">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2.5" /></svg>
+            </button>
+          : <button className="send-btn" onClick={submit} disabled={!canSend} aria-label="Send message">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
+            </button>
+        }
       </div>
       <p className="input-hint">Synapse AI runs on the cloud — your conversations are safe with us.</p>
     </div>
@@ -377,7 +457,13 @@ function ChatApp() {
   const [threadMessages, setThreadMessages] = useState({});
 
   const streamRef = useRef("");
-  const bottomRef = useRef(null);
+  const messagesRef = useRef(null);
+  // Auto-follow new content only while the user is at the bottom — scrolling
+  // up to read mid-stream pauses it; scrolling back down resumes it.
+  const followRef = useRef(true);
+  const lastAutoTopRef = useRef(null);   // scrollTop we set ourselves
+  const prevTopRef = useRef(0);
+  const autoUntilRef = useRef(0);        // ignore scroll events during our smooth scroll
 
   // Load threads on mount (retry while backend warms up — embeddings can take 15–30s)
   useEffect(() => {
@@ -413,8 +499,55 @@ function ChatApp() {
     };
   }, []);
 
-  // Auto-scroll
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, streamMsg]);
+  // Auto-scroll. Not scrollIntoView-per-token: during fast streaming (code)
+  // each call restarted the previous smooth animation mid-flight, so the view
+  // jittered up and down. Instead, one rAF loop eases toward the bottom while
+  // streaming, and a single smooth scroll runs when a message is added.
+  const handleMessagesScroll = useCallback(() => {
+    const el = messagesRef.current;
+    if (!el) return;
+    const top = el.scrollTop;
+    const prevTop = prevTopRef.current;
+    prevTopRef.current = top;
+    if (Date.now() < autoUntilRef.current) return;
+    if (lastAutoTopRef.current !== null && Math.abs(top - lastAutoTopRef.current) < 2) return;
+    const distance = el.scrollHeight - el.clientHeight - top;
+    // Resume when back at the bottom. "Near + moving down" counts too: during a
+    // fast stream new content lands before this event fires, so the user who
+    // just reached the bottom is already a few dozen px above it again.
+    if (distance < 8 || (top > prevTop && distance < 120)) followRef.current = true;
+    else if (top < prevTop - 2 && distance > 80) followRef.current = false;   // moved up, e.g. scrollbar drag
+  }, []);
+
+  // Trackpads scroll in tiny steps that never cross the 80px line, so read
+  // the intent directly: any upward wheel/touch scroll pauses auto-follow.
+  const pauseFollowOnWheel = useCallback(e => { if (e.deltaY < 0) followRef.current = false; }, []);
+  const pauseFollowOnTouch = useCallback(() => { followRef.current = false; }, []);
+
+  useEffect(() => {
+    const el = messagesRef.current;
+    if (!el || !followRef.current) return;
+    autoUntilRef.current = Date.now() + 600;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+  }, [messages]);
+
+  useEffect(() => {
+    if (!streaming) return;
+    let raf;
+    const tick = () => {
+      const el = messagesRef.current;
+      if (el && followRef.current && Date.now() >= autoUntilRef.current) {
+        const gap = el.scrollHeight - el.clientHeight - el.scrollTop;
+        if (gap > 1) {
+          el.scrollTop += Math.max(1, gap * 0.2);   // ease in: big chunks glide, small ones barely move
+          lastAutoTopRef.current = el.scrollTop;
+        }
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [streaming]);
 
   useEffect(() => {
     fetch(`${BASE}/voice/options`)
@@ -442,11 +575,14 @@ function ChatApp() {
   }, []);
 
   const sendRef = useRef(null);
+  const abortRef = useRef(null);          // AbortController of the in-flight answer
+  const stopRequestedRef = useRef(false); // distinguishes Stop from a voice interruption
 
   const loadThread = useCallback((tid) => {
     // ✅ FIX: Never re-fetch from backend when switching threads.
     // Always use our local threadMessages copy which has the full history.
     if (tid === threadId) return;
+    followRef.current = true;
     setThreadId(tid);
     setMessages(threadMessages[tid] || []);
   }, [threadId, threadMessages]);
@@ -476,13 +612,22 @@ function ChatApp() {
     if ((!text.trim() && !currentAttachment) || streaming) return;
 
     voiceRef.current?.interrupt();
-    const signal = fromVoice ? voiceRef.current?.newAbortSignal() : undefined;
+    // One controller per answer: Stop aborts it; in voice mode, the voice
+    // session's own interrupt signal (user starts speaking) aborts it too.
+    const controller = new AbortController();
+    const voiceSignal = fromVoice ? voiceRef.current?.newAbortSignal() : undefined;
+    voiceSignal?.addEventListener("abort", () => controller.abort());
+    const signal = controller.signal;
+    abortRef.current = controller;
+    stopRequestedRef.current = false;
 
     setInput("");
     setVoiceError(null);
     if (currentAttachment) setAttachment(null);
 
     if (!threads.includes(threadId)) setThreads(p => [...p, threadId]);
+
+    followRef.current = true;   // sending always brings the conversation back into view
 
     // ✅ FIX: Append user message both to display state AND local thread store
     const displayText = text.trim() || `Sent ${currentAttachment?.filename}`;
@@ -510,6 +655,11 @@ function ChatApp() {
 
     let spokenUpTo = 0;
     const ttsBufferRef = { current: "" };
+    // Fast streams (code) deliver many tokens per frame; rendering on every
+    // token re-parsed the growing markdown far more often than the screen can
+    // show, so the UI fell behind and lurched. Render at most once per frame.
+    let renderFrame = null;
+    const renderStream = () => { renderFrame = null; setStreamMsg(streamRef.current); };
 
     try {
       const full = await api.streamChat(
@@ -518,7 +668,7 @@ function ChatApp() {
         token => {
           setToolStatus(null);
           streamRef.current += token;
-          setStreamMsg(streamRef.current);
+          if (renderFrame === null) renderFrame = requestAnimationFrame(renderStream);
 
           if (fromVoice && voiceRef.current) {
             ttsBufferRef.current += token;
@@ -557,7 +707,19 @@ function ChatApp() {
         });
       }
     } catch (err) {
-      if (err.name === "AbortError") return;
+      if (err.name === "AbortError") {
+        // Stop: keep whatever was already shown, like ChatGPT. (A voice
+        // interruption discards it — the user is already saying something new.)
+        const partial = streamRef.current;
+        if (stopRequestedRef.current && partial.trim()) {
+          setMessages(p => {
+            const updated = [...p, { role: "assistant", content: partial }];
+            setThreadMessages(prev => ({ ...prev, [threadId]: updated }));
+            return updated;
+          });
+        }
+        return;
+      }
       const errMsg = { role: "assistant", content: `⚠️ **Error:** ${err.message}` };
       setMessages(p => {
         const updated = [...p, errMsg];
@@ -566,6 +728,8 @@ function ChatApp() {
       });
       if (fromVoice) voiceRef.current?.speakStatus("Sorry, something went wrong.");
     } finally {
+      if (abortRef.current === controller) abortRef.current = null;
+      if (renderFrame !== null) cancelAnimationFrame(renderFrame);
       setStreaming(false); setStreamMsg(""); setToolStatus(null); streamRef.current = "";
       if (fromVoice) voiceRef.current?.notifyAssistantTurnComplete();
       if (!fromVoice) {
@@ -578,6 +742,16 @@ function ChatApp() {
   }, [streaming, messages, threadId, threads, attachment]);
 
   sendRef.current = send;
+
+  // Stop generating: the UI stops at once (abort), and the backend is told
+  // explicitly too — proxies (Vercel/HF) don't always pass a disconnect on, and
+  // without it the model and tools would keep running and burning quota.
+  const stopGeneration = useCallback(() => {
+    if (!abortRef.current) return;
+    stopRequestedRef.current = true;
+    api.stopChat(threadId).catch(() => { /* the abort below still ends it locally */ });
+    abortRef.current.abort();
+  }, [threadId]);
 
   const handleVoiceToggle = useCallback(() => {
     if (!voiceSupported) {
@@ -644,7 +818,8 @@ function ChatApp() {
       <main className={`main${streaming ? " is-streaming" : ""}`}>
         {showHero
           ? <Hero onPrompt={send} />
-          : <div className="messages">
+          : <div className="messages" ref={messagesRef} onScroll={handleMessagesScroll}
+                 onWheel={pauseFollowOnWheel} onTouchMove={pauseFollowOnTouch}>
               {messages.map((m, i) => <Message key={i} role={m.role} content={m.content} attachmentName={m.attachmentName} />)}
               {streaming && streamMsg  && <Message role="assistant" content={streamMsg} streaming />}
               {streaming && !streamMsg && TOOL_STATUS_LABELS[toolStatus] && (
@@ -654,7 +829,6 @@ function ChatApp() {
               {voiceError && (
                 <div className="voice-error-banner">{voiceError}</div>
               )}
-              <div ref={bottomRef} />
             </div>
         }
         <VoiceStatusBar
@@ -684,6 +858,7 @@ function ChatApp() {
           onRemoveAttachment={removeAttachment}
           fileInputRef={fileInputRef}
           onFileSelect={handleFileSelect}
+          onStop={stopGeneration}
         />
       </main>
     </div>

@@ -402,6 +402,10 @@ body {
   flex: 1; overflow-y: auto;
   padding: 28px 0 10px;
   display: flex; flex-direction: column;
+  /* Scrolling here is managed in JS (auto-follow while streaming); the
+     browser's own scroll anchoring nudged scrollTop on re-renders, which
+     read as the user scrolling and switched auto-follow off. */
+  overflow-anchor: none;
 }
 
 .msg {
@@ -544,6 +548,21 @@ body {
 .send-btn:hover:not(:disabled) { transform: scale(1.1); box-shadow: 0 0 20px var(--cyan-glow); }
 .send-btn:active:not(:disabled) { transform: scale(0.95); }
 .send-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+/* Stop generating — replaces the send button while an answer is in progress.
+   The soft pulse ring stands in for the old spinner: "working, click to stop". */
+.stop-btn {
+  background: var(--text);
+  color: var(--bg-deep);
+  animation: stop-pulse 1.6s ease-out infinite;
+}
+.stop-btn:hover { background: #fff; transform: scale(1.06); }
+.stop-btn:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+@keyframes stop-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(221,232,240,0.35); }
+  70%  { box-shadow: 0 0 0 8px rgba(221,232,240,0); }
+  100% { box-shadow: 0 0 0 0 rgba(221,232,240,0); }
+}
 
 .input-hint { text-align:center; font-size:11px; color:var(--text-dim); margin-top:8px; }
 
@@ -822,20 +841,90 @@ body {
   background: var(--bg); color: var(--text-muted); font-size: 14px;
 }
 
-.topbar-user {
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 8px; padding: 12px 14px;
+/* ── Account menu (sidebar footer) ── */
+.account {
+  position: relative;
+  margin-top: auto;               /* pinned to the bottom of the sidebar */
+  padding: 10px;
   border-top: 1px solid var(--border);
-  font-size: 12.5px; color: var(--text-muted);
 }
-.topbar-user-email { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.topbar-logout-btn {
-  background: none; border: 1px solid var(--border); border-radius: var(--r);
-  color: var(--text-muted); font-size: 12px; padding: 5px 10px; cursor: pointer;
-  transition: color var(--ease), border-color var(--ease);
-  flex-shrink: 0;
+.account-trigger {
+  width: 100%;
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--ease), border-color var(--ease);
+  -webkit-tap-highlight-color: transparent;   /* no teal flash on mobile tap */
 }
-.topbar-logout-btn:hover { color: var(--danger); border-color: var(--danger); }
+.account-trigger:hover,
+.account-trigger.open { background: var(--bg-hover); border-color: var(--border-light); }
+.account-trigger:focus-visible { outline: 2px solid var(--cyan-2); outline-offset: 2px; }
+.account-avatar {
+  width: 30px; height: 30px; flex-shrink: 0;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, #003d55, #006680);
+  border: 1px solid rgba(0,212,255,0.3);
+  color: var(--cyan);
+  font-size: 13px; font-weight: 600;
+}
+.account-email {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text);
+}
+.account-chevron {
+  flex-shrink: 0; color: var(--text-muted);
+  transition: transform var(--ease);
+}
+.account-trigger.open .account-chevron { transform: rotate(180deg); }
+
+.account-menu {
+  position: absolute;
+  left: 10px; right: 10px;
+  bottom: calc(100% - 4px);       /* opens upward, just above the account row */
+  padding: 6px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-radius: var(--r);
+  box-shadow: 0 -8px 30px rgba(0,0,0,0.45);
+  z-index: 30;
+  animation: account-menu-in 0.14s ease-out;
+}
+@keyframes account-menu-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.account-menu-label {
+  padding: 6px 10px 0;
+  font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--text-muted);
+}
+.account-menu-email {
+  padding: 2px 10px 8px;
+  font-size: 13px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.account-menu-sep { height: 1px; margin: 0 4px 6px; background: var(--border); }
+.account-menu-item {
+  width: 100%;
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 10px;
+  background: transparent; border: none; border-radius: 8px;
+  color: var(--text); font-family: var(--font); font-size: 13px;
+  cursor: pointer; text-align: left;
+  transition: background var(--ease), color var(--ease);
+}
+.account-menu-item.danger:hover,
+.account-menu-item.danger:focus-visible { background: rgba(255,71,87,0.12); color: var(--danger); outline: none; }
+.account-menu-item:disabled { opacity: 0.6; cursor: default; }
 
 /* ══════════════════════════════════════════════════════
    RESPONSIVE

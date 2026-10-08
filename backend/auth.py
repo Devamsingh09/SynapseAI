@@ -321,7 +321,15 @@ def set_session_cookie(response, token: str) -> None:
 
 
 def clear_session_cookie(response) -> None:
-    response.delete_cookie(key=COOKIE_NAME, path="/")
+    # Same attributes as set_session_cookie: browsers match a cookie by these,
+    # and a Secure cookie may not be replaced by a non-Secure deletion.
+    response.delete_cookie(
+        key=COOKIE_NAME,
+        path="/",
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite="lax",
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

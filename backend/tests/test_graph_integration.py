@@ -56,7 +56,7 @@ class FakeChatLLM:
         self.responses = list(responses)
         self.calls = []  # each entry: the full `messages` list passed in
 
-    def __call__(self, messages, writer):
+    def __call__(self, messages, writer, should_stop=None):
         self.calls.append(messages)
         if not self.responses:
             raise AssertionError("FakeChatLLM ran out of canned responses")
@@ -187,7 +187,7 @@ def test_tool_cycle_limit_forces_finalize_without_extra_tool_call(test_chatbot, 
     fake_eval = FakeEvaluator([])  # evaluator must never fire — force_finalize check comes first
     finalize_calls = []
 
-    def fake_stream_bound_llm(bound_llm, messages, writer):
+    def fake_stream_bound_llm(bound_llm, messages, writer, should_stop=None):
         finalize_calls.append(messages)
         return _final_answer_message("Best-effort answer from partial evidence.")
 
