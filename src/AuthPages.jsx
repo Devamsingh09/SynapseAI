@@ -1,21 +1,52 @@
 import React, { useState } from "react";
 import { Link, Navigate, useNavigate, useSearchParams } from "react-router-dom";
 import { useAuth } from "./AuthContext";
+import { BrandMark, Wordmark } from "./Brand";
+import { EyeIcon, EyeOffIcon, ArrowRightIcon } from "./Icons";
 
 // ═══════════════════════════════════════════════════════
-// SHARED LAYOUT
+// SHARED LAYOUT — spec §04: brand/story column + sign-in card.
+// Every auth page (login, signup, verify, forgot, reset) uses the same
+// shell so the whole entry flow reads as one product.
 // ═══════════════════════════════════════════════════════
-function AuthCard({ title, subtitle, children }) {
+function AuthShell({ title, subtitle, children }) {
   return (
     <div className="auth-screen">
-      <div className="auth-card">
-        <div className="auth-logo">
-          <div className="logo-orb">🧠</div>
-          <div className="logo-name">Synapse AI</div>
-        </div>
-        <h1 className="auth-title">{title}</h1>
-        {subtitle && <p className="auth-subtitle">{subtitle}</p>}
-        {children}
+      <div className="auth-grid">
+        <section className="auth-story" aria-label="About SynapseAI">
+          <div className="auth-brand">
+            <BrandMark size={46} />
+            <div>
+              <Wordmark className="wordmark-lg" />
+              <div className="auth-tagline">Think beyond answers.</div>
+            </div>
+          </div>
+
+          <div className="auth-story-body">
+            <div className="eyebrow">Your intelligent workspace</div>
+            <h2 className="auth-headline">
+              Ideas connect.<br />
+              <span>Intelligence happens.</span>
+            </h2>
+            <p className="auth-lede">Research, reasoning and AI-powered tools in one focused workspace.</p>
+            <div className="auth-features">
+              <div className="feature-tile">
+                <div className="feature-kicker">Agentic AI</div>
+                <div className="feature-text">Reason and execute</div>
+              </div>
+              <div className="feature-tile">
+                <div className="feature-kicker cyan">Smart tools</div>
+                <div className="feature-text">One connected space</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <main className="auth-card">
+          <h1 className="auth-title">{title}</h1>
+          {subtitle && <p className="auth-subtitle">{subtitle}</p>}
+          {children}
+        </main>
       </div>
     </div>
   );
@@ -23,17 +54,81 @@ function AuthCard({ title, subtitle, children }) {
 
 function FieldError({ children }) {
   if (!children) return null;
-  return <div className="auth-error">{children}</div>;
+  return <div className="inline-alert error" role="alert">{children}</div>;
 }
 
 function FieldNotice({ children }) {
   if (!children) return null;
-  return <div className="auth-notice">{children}</div>;
+  return <div className="inline-alert info" role="status">{children}</div>;
+}
+
+function Spinner() {
+  return <span className="spinner" aria-hidden="true" />;
+}
+
+function SubmitButton({ busy, busyLabel, children }) {
+  return (
+    <button className="btn-primary btn-block" type="submit" disabled={busy} aria-busy={busy}>
+      {busy ? <><Spinner /> {busyLabel}</> : children}
+    </button>
+  );
+}
+
+function TextField({ id, label, labelAside, ...inputProps }) {
+  return (
+    <div className="field">
+      <div className="field-row">
+        <label className="field-label" htmlFor={id}>{label}</label>
+        {labelAside}
+      </div>
+      <input id={id} className="field-input" {...inputProps} />
+    </div>
+  );
+}
+
+// Optional reveal toggle (spec §04): a real <button>, keyboard reachable,
+// with an accessible name and pressed state.
+function PasswordField({ id, label, labelAside, ...inputProps }) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <div className="field">
+      <div className="field-row">
+        <label className="field-label" htmlFor={id}>{label}</label>
+        {labelAside}
+      </div>
+      <div className="password-wrap">
+        <input id={id} className="field-input" type={visible ? "text" : "password"} {...inputProps} />
+        <button
+          type="button"
+          className="password-toggle"
+          onClick={() => setVisible(v => !v)}
+          aria-label={visible ? "Hide password" : "Show password"}
+          aria-pressed={visible}
+          aria-controls={id}
+        >
+          {visible ? <EyeOffIcon size={17} /> : <EyeIcon size={17} />}
+        </button>
+      </div>
+    </div>
+  );
 }
 
 // ═══════════════════════════════════════════════════════
 // LOGIN
 // ═══════════════════════════════════════════════════════
+function loginErrorMessage(err) {
+  // 401 = wrong email or password. Generic on purpose: never reveal whether
+  // an account exists. 0 / 5xx = server unreachable or still waking up.
+  // Anything else (e.g. 403 "Please verify your email…") is shown as sent.
+  if (err.status === 401) {
+    return "We couldn't sign you in with those details. Check your email and password and try again.";
+  }
+  if (!err.status || err.status >= 500) {
+    return "We couldn't reach the server. Check your connection and try again.";
+  }
+  return err.message;
+}
+
 export function LoginPage() {
   const { login, isAuthenticated, loading } = useAuth();
   const navigate = useNavigate();
@@ -46,54 +141,52 @@ export function LoginPage() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (submitting) return;
     setError(null);
     setSubmitting(true);
     try {
       await login(email, password);
       navigate("/");
     } catch (err) {
-      setError(err.message);
+      setError(loginErrorMessage(err));
     } finally {
       setSubmitting(false);
     }
   };
 
   return (
-    <AuthCard title="Welcome back" subtitle="Log in to continue to Synapse AI">
+    <AuthShell title="Welcome back" subtitle="Sign in to continue to your workspace.">
       <form className="auth-form" onSubmit={handleSubmit}>
-        <label className="auth-label">
-          Email
-          <input
-            className="auth-input"
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            autoComplete="email"
-            required
-          />
-        </label>
-        <label className="auth-label">
-          Password
-          <input
-            className="auth-input"
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            autoComplete="current-password"
-            required
-          />
-        </label>
+        <TextField
+          id="login-email"
+          label="Email address"
+          type="email"
+          placeholder="you@example.com"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          autoComplete="email"
+          required
+        />
+        <PasswordField
+          id="login-password"
+          label="Password"
+          labelAside={<Link className="field-link" to="/forgot-password">Forgot password?</Link>}
+          placeholder="Enter your password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          autoComplete="current-password"
+          required
+        />
         <FieldError>{error}</FieldError>
-        <button className="auth-submit" type="submit" disabled={submitting}>
-          {submitting ? "Logging in…" : "Log in"}
-        </button>
+        <SubmitButton busy={submitting} busyLabel="Signing in…">
+          Sign in to SynapseAI <ArrowRightIcon size={16} />
+        </SubmitButton>
       </form>
       <div className="auth-links">
-        <Link to="/forgot-password">Forgot password?</Link>
-        <span className="auth-links-sep">·</span>
-        <Link to="/signup">Create an account</Link>
+        New to SynapseAI? <Link to="/signup">Create an account</Link>
       </div>
-    </AuthCard>
+      <div className="auth-foot">Secure workspace · Built for intelligent work</div>
+    </AuthShell>
   );
 }
 
@@ -112,6 +205,7 @@ export function SignupPage() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (submitting) return;
     setError(null);
     if (password.length < 8) {
       setError("Password must be at least 8 characters.");
@@ -130,55 +224,51 @@ export function SignupPage() {
 
   if (done) {
     return (
-      <AuthCard title="Check your email" subtitle={`We sent a verification link to ${email}.`}>
+      <AuthShell title="Check your email" subtitle={`We sent a verification link to ${email}.`}>
         <FieldNotice>
           {done.email_sent
-            ? "Click the link in that email to activate your account, then come back and log in."
+            ? "Click the link in that email to activate your account, then come back and sign in."
             : "Email sending isn't configured on this server yet — check the backend server log for the verification link (dev mode)."}
         </FieldNotice>
         <div className="auth-links">
-          <Link to="/login">Back to login</Link>
+          <Link to="/login">Back to sign in</Link>
         </div>
-      </AuthCard>
+      </AuthShell>
     );
   }
 
   return (
-    <AuthCard title="Create your account" subtitle="Free forever — just an email and password">
+    <AuthShell title="Create your account" subtitle="Free forever — just an email and password.">
       <form className="auth-form" onSubmit={handleSubmit}>
-        <label className="auth-label">
-          Email
-          <input
-            className="auth-input"
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            autoComplete="email"
-            required
-          />
-        </label>
-        <label className="auth-label">
-          Password
-          <input
-            className="auth-input"
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            autoComplete="new-password"
-            minLength={8}
-            required
-          />
-        </label>
-        <div className="auth-hint">At least 8 characters.</div>
+        <TextField
+          id="signup-email"
+          label="Email address"
+          type="email"
+          placeholder="you@example.com"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          autoComplete="email"
+          required
+        />
+        <PasswordField
+          id="signup-password"
+          label="Password"
+          placeholder="At least 8 characters"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          autoComplete="new-password"
+          minLength={8}
+          required
+          aria-describedby="signup-password-hint"
+        />
+        <div className="field-hint" id="signup-password-hint">At least 8 characters.</div>
         <FieldError>{error}</FieldError>
-        <button className="auth-submit" type="submit" disabled={submitting}>
-          {submitting ? "Creating account…" : "Sign up"}
-        </button>
+        <SubmitButton busy={submitting} busyLabel="Creating account…">Create account</SubmitButton>
       </form>
       <div className="auth-links">
-        <span>Already have an account?</span> <Link to="/login">Log in</Link>
+        Already have an account? <Link to="/login">Sign in</Link>
       </div>
-    </AuthCard>
+    </AuthShell>
   );
 }
 
@@ -217,15 +307,17 @@ export function VerifyEmailPage() {
       });
   }, [params, verifyEmail]);
 
+  const title = status === "ok" ? "Email verified" : status === "error" ? "Verification failed" : "Verifying…";
+
   return (
-    <AuthCard title={status === "ok" ? "Email verified" : "Verifying…"}>
+    <AuthShell title={title}>
       {status === "verifying" && <FieldNotice>One moment…</FieldNotice>}
       {status === "ok" && <FieldNotice>{message}</FieldNotice>}
       {status === "error" && <FieldError>{message}</FieldError>}
       <div className="auth-links">
-        <Link to="/login">Go to login</Link>
+        <Link to="/login">Go to sign in</Link>
       </div>
-    </AuthCard>
+    </AuthShell>
   );
 }
 
@@ -241,6 +333,7 @@ export function ForgotPasswordPage() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (submitting) return;
     setError(null);
     setSubmitting(true);
     try {
@@ -254,38 +347,36 @@ export function ForgotPasswordPage() {
   };
 
   if (sent) {
+    // Only shown after the server accepted the request.
     return (
-      <AuthCard title="Check your email" subtitle="If that email has an account, a reset link is on its way.">
+      <AuthShell title="Check your email" subtitle="If that email has an account, a reset link is on its way.">
         <div className="auth-links">
-          <Link to="/login">Back to login</Link>
+          <Link to="/login">Back to sign in</Link>
         </div>
-      </AuthCard>
+      </AuthShell>
     );
   }
 
   return (
-    <AuthCard title="Reset your password" subtitle="Enter your account email and we'll send a reset link">
+    <AuthShell title="Reset your password" subtitle="Enter your account email and we'll send a reset link.">
       <form className="auth-form" onSubmit={handleSubmit}>
-        <label className="auth-label">
-          Email
-          <input
-            className="auth-input"
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            autoComplete="email"
-            required
-          />
-        </label>
+        <TextField
+          id="forgot-email"
+          label="Email address"
+          type="email"
+          placeholder="you@example.com"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          autoComplete="email"
+          required
+        />
         <FieldError>{error}</FieldError>
-        <button className="auth-submit" type="submit" disabled={submitting}>
-          {submitting ? "Sending…" : "Send reset link"}
-        </button>
+        <SubmitButton busy={submitting} busyLabel="Sending…">Send reset link</SubmitButton>
       </form>
       <div className="auth-links">
-        <Link to="/login">Back to login</Link>
+        <Link to="/login">Back to sign in</Link>
       </div>
-    </AuthCard>
+    </AuthShell>
   );
 }
 
@@ -305,6 +396,7 @@ export function ResetPasswordPage() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (submitting) return;
     setError(null);
     if (!token) {
       setError("Missing or invalid reset link.");
@@ -332,49 +424,43 @@ export function ResetPasswordPage() {
 
   if (done) {
     return (
-      <AuthCard title="Password updated" subtitle="Redirecting you to login…">
+      <AuthShell title="Password updated" subtitle="Redirecting you to sign in…">
         <div className="auth-links">
-          <Link to="/login">Go to login now</Link>
+          <Link to="/login">Go to sign in now</Link>
         </div>
-      </AuthCard>
+      </AuthShell>
     );
   }
 
   return (
-    <AuthCard title="Set a new password">
+    <AuthShell title="Set a new password">
       <form className="auth-form" onSubmit={handleSubmit}>
-        <label className="auth-label">
-          New password
-          <input
-            className="auth-input"
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            autoComplete="new-password"
-            minLength={8}
-            required
-          />
-        </label>
-        <label className="auth-label">
-          Confirm new password
-          <input
-            className="auth-input"
-            type="password"
-            value={confirm}
-            onChange={(e) => setConfirm(e.target.value)}
-            autoComplete="new-password"
-            minLength={8}
-            required
-          />
-        </label>
+        <PasswordField
+          id="reset-password"
+          label="New password"
+          placeholder="At least 8 characters"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          autoComplete="new-password"
+          minLength={8}
+          required
+        />
+        <PasswordField
+          id="reset-confirm"
+          label="Confirm new password"
+          placeholder="Repeat the new password"
+          value={confirm}
+          onChange={(e) => setConfirm(e.target.value)}
+          autoComplete="new-password"
+          minLength={8}
+          required
+        />
         <FieldError>{error}</FieldError>
-        <button className="auth-submit" type="submit" disabled={submitting}>
-          {submitting ? "Updating…" : "Update password"}
-        </button>
+        <SubmitButton busy={submitting} busyLabel="Updating…">Update password</SubmitButton>
       </form>
       <div className="auth-links">
-        <Link to="/login">Back to login</Link>
+        <Link to="/login">Back to sign in</Link>
       </div>
-    </AuthCard>
+    </AuthShell>
   );
 }

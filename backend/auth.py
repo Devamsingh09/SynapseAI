@@ -98,6 +98,12 @@ def _init_schema() -> None:
             );
             """
         )
+        # Migration: persisted conversation titles (see thread_titles.py).
+        # NULL = not generated yet. Existing databases gain the column on
+        # startup; existing rows are untouched.
+        cols = {row[1] for row in _conn.execute("PRAGMA table_info(thread_owners)")}
+        if "title" not in cols:
+            _conn.execute("ALTER TABLE thread_owners ADD COLUMN title TEXT")
         _conn.commit()
 
 
@@ -263,6 +269,38 @@ def list_user_thread_ids(user_id: int) -> set:
         cur = _conn.cursor()
         cur.execute("SELECT thread_id FROM thread_owners WHERE user_id = ?", (user_id,))
         return {r[0] for r in cur.fetchall()}
+
+
+def get_thread_title(thread_id: str) -> Optional[str]:
+    with _lock:
+        cur = _conn.cursor()
+        cur.execute("SELECT title FROM thread_owners WHERE thread_id = ?", (thread_id,))
+        row = cur.fetchone()
+    return row[0] if row and row[0] else None
+
+
+def set_thread_title(thread_id: str, title: str, only_if_empty: bool = False) -> bool:
+    """Store a thread's title. With only_if_empty, never overwrite an existing
+    title (e.g. one the user typed). Returns True if a row was updated."""
+    sql = "UPDATE thread_owners SET title = ? WHERE thread_id = ?"
+    if only_if_empty:
+        sql += " AND (title IS NULL OR title = '')"
+    with _lock:
+        cur = _conn.execute(sql, (title, thread_id))
+        _conn.commit()
+        return cur.rowcount > 0
+
+
+def list_user_thread_titles(user_id: int) -> dict:
+    """{thread_id: title} for this user's threads that have a stored title."""
+    with _lock:
+        cur = _conn.cursor()
+        cur.execute(
+            "SELECT thread_id, title FROM thread_owners "
+            "WHERE user_id = ? AND title IS NOT NULL AND title != ''",
+            (user_id,),
+        )
+        return {r[0]: r[1] for r in cur.fetchall()}
 
 
 def delete_thread_ownership(thread_id: str) -> None:

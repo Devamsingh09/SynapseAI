@@ -14,11 +14,12 @@ import threading
 
 import auth
 import email_service
+import thread_titles
 from chatbot_backend import (
     chatbot,
     retrieve_all_threads,
     delete_thread_data,
-    generate_summary,
+    generate_title,
     iter_chat_stream,
     get_thread_lock,
     GROQ_API_KEY,
@@ -78,6 +79,18 @@ class ChatRequest(BaseModel):
 
 class SummaryRequest(BaseModel):
     text: str
+    # Optional so older frontends keep working; when sent, the generated
+    # title is persisted for that thread.
+    thread_id: Optional[str] = None
+
+
+class RenameThreadRequest(BaseModel):
+    title: str
+
+    @field_validator("title")
+    @classmethod
+    def _valid_title(cls, v: str) -> str:
+        return thread_titles.normalize_user_title(v)
 
 
 class StopRequest(BaseModel):
@@ -153,8 +166,18 @@ def _load_thread_history(thread_id: str) -> dict:
         elif isinstance(msg, AIMessage) and msg.content:
             messages.append({"role": "assistant", "content": msg.content})
 
-    user_msgs = [m for m in messages if m["role"] == "user"]
-    title = generate_summary(user_msgs[0]["content"]) if user_msgs else "New Conversation"
+    # Stored title first. Only threads that never got one (e.g. created
+    # before titles were persisted) are titled here — once — and saved.
+    title = auth.get_thread_title(thread_id)
+    if not title:
+        user_msgs = [m for m in messages if m["role"] == "user"]
+        if user_msgs:
+            source = thread_titles.title_source(user_msgs[0]["content"])
+            title, persist = thread_titles.make_title(source, generate_title)
+            if persist:
+                auth.set_thread_title(thread_id, title, only_if_empty=True)
+        else:
+            title = thread_titles.DEFAULT_TITLE
 
     return {"thread_id": thread_id, "title": title, "messages": messages}
 
@@ -321,7 +344,11 @@ async def get_threads(current_user: auth.User = Depends(auth.get_current_user)):
     async with io_slot():
         all_threads = await run_in_pool(retrieve_all_threads, timeout=IO_TIMEOUT_SEC)
     owned = auth.list_user_thread_ids(current_user.id)
-    return {"threads": [t for t in all_threads if t in owned]}
+    threads = [t for t in all_threads if t in owned]
+    # Stored titles ride along so the sidebar can show names immediately,
+    # without waiting for every thread's history to load.
+    stored = auth.list_user_thread_titles(current_user.id)
+    return {"threads": threads, "titles": {t: stored[t] for t in threads if t in stored}}
 
 
 @app.get("/thread/{thread_id}/history")
@@ -408,10 +435,36 @@ async def upload_file(
 
 @app.post("/chat/summary")
 async def summarize(req: SummaryRequest, current_user: auth.User = Depends(auth.get_current_user)):
-    """Generate a short title from the first user message."""
+    """Title a conversation from its first user message, and persist it when
+    `thread_id` is given. A title the user already typed is never replaced."""
+    source = thread_titles.title_source(req.text)
     async with io_slot():
-        title = await run_in_pool(generate_summary, req.text, timeout=IO_TIMEOUT_SEC)
+        title, persist = await run_in_pool(
+            thread_titles.make_title, source, generate_title, timeout=IO_TIMEOUT_SEC
+        )
+    if req.thread_id and persist:
+        # This request races the first /chat/stream on a client-generated
+        # thread_id, so claim ownership here too — same rule as chat_stream.
+        owner_id = auth.get_thread_owner(req.thread_id)
+        if owner_id is None:
+            auth.claim_thread(req.thread_id, current_user.id)
+            owner_id = current_user.id
+        if owner_id == current_user.id:
+            if not auth.set_thread_title(req.thread_id, title, only_if_empty=True):
+                title = auth.get_thread_title(req.thread_id) or title
     return {"title": title}
+
+
+@app.patch("/thread/{thread_id}/title")
+async def rename_thread(
+    thread_id: str,
+    req: RenameThreadRequest,
+    current_user: auth.User = Depends(auth.get_current_user),
+):
+    """Rename a conversation (owner only)."""
+    auth.require_thread_owner(thread_id, current_user.id)
+    auth.set_thread_title(thread_id, req.title)
+    return {"thread_id": thread_id, "title": req.title}
 
 
 @app.post("/chat/stop")

@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import rehypeRaw from "rehype-raw";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { v4 as uuid } from "uuid";
@@ -15,29 +14,42 @@ import {
 import { API_BASE } from "./apiConfig";
 import { AuthProvider, useAuth } from "./AuthContext";
 import { LoginPage, SignupPage, VerifyEmailPage, ForgotPasswordPage, ResetPasswordPage } from "./AuthPages";
+import { BrandMark, Wordmark } from "./Brand";
+import ToolDirectory from "./ToolDirectory";
+import {
+  PlusIcon, MenuIcon, CloseIcon, ChatIcon, ToolsIcon, TrashIcon, PencilIcon, PaperclipIcon,
+  MicIcon, SendIcon, StopIcon, LogoutIcon, ChevronUpIcon, FileIcon, ImageIcon,
+  AlertIcon, CopyIcon, CheckIcon, SearchIcon, CodeIcon, BookIcon, SparkIcon,
+} from "./Icons";
 
 // ═══════════════════════════════════════════════════════
 // API
 // ═══════════════════════════════════════════════════════
 const BASE = API_BASE;
 
-// Labels for lightweight "typing" status indicators streamed from the
-// backend. `using_tools` already existed; `evaluating` / `refining` /
-// `finalizing` come from the adaptive agent loop (see backend/adaptive_loop.py)
-// — internal evaluator content itself is never streamed, only these status names.
+// Labels for the lightweight status events streamed from the backend
+// (`data: {"status": ...}`). `using_tools` doesn't say WHICH tool, so the
+// label stays generic; `evaluating` / `refining` / `finalizing` come from the
+// adaptive agent loop (backend/adaptive_loop.py) — only these status names
+// are streamed, never the evaluator's internal content.
 const TOOL_STATUS_LABELS = {
-  using_tools: "Searching the web & using tools…",
+  using_tools: "Using tools…",
   evaluating: "Checking the results…",
   refining: "Refining the answer…",
   finalizing: "Finalizing…",
 };
+
+const ERROR_PREFIX = "⚠️ **Error:** ";
 
 const api = {
   // credentials: "include" — every call to the protected backend needs to
   // send the httpOnly session cookie set by /auth/login; without it every
   // one of these would come back 401 once a thread/message/etc. is gated.
   newThread:    ()    => fetch(`${BASE}/thread/new`, { method: "POST", credentials: "include" }).then(r => r.json()).then(d => d.thread_id),
-  getThreads:   ()    => fetch(`${BASE}/threads`, { credentials: "include" }).then(r => r.json()).then(d => d.threads || []),
+  // { threads: [ids], titles: {id: storedTitle} } — `titles` is absent on
+  // older backends, so default it.
+  getThreads:   ()    => fetch(`${BASE}/threads`, { credentials: "include" }).then(r => r.json())
+    .then(d => ({ threads: d.threads || [], titles: d.titles || {} })),
 
   getHistory:   (tid) => fetch(`${BASE}/thread/${tid}/history`, { credentials: "include" })
     .then(r => r.ok ? r.json() : { messages: [], title: "New Conversation" })
@@ -53,12 +65,28 @@ const api = {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ thread_id: tid }),
   }),
-  getSummary:   (txt) => fetch(`${BASE}/chat/summary`, {
+  // Passing thread_id makes the backend store the title (generated once).
+  getSummary:   (txt, tid) => fetch(`${BASE}/chat/summary`, {
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text: txt })
+    body: JSON.stringify({ text: txt, thread_id: tid })
   }).then(r => r.json()).then(d => d.title || "New Conversation"),
+
+  renameThread: (tid, title) => fetch(`${BASE}/thread/${tid}/title`, {
+    method: "PATCH",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  }).then(async r => {
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      // FastAPI validation errors arrive as a list of { msg }.
+      const msg = Array.isArray(d.detail) ? d.detail[0]?.msg : d.detail;
+      throw new Error((msg || `Rename failed (${r.status})`).replace(/^Value error, /, ""));
+    }
+    return d.title;
+  }),
 
   uploadFile: (file) => {
     const fd = new FormData();
@@ -109,20 +137,59 @@ const api = {
   }
 };
 
+// /health is a real backend endpoint: { ok } is true when the model provider
+// is configured. The status pill only ever reflects what it returns.
+const HEALTH_LABELS = {
+  checking: "Connecting…",
+  ok: "Connected",
+  degraded: "Service issue",
+  down: "Unavailable",
+};
+
+// ═══════════════════════════════════════════════════════
+// TOP BAR
+// ═══════════════════════════════════════════════════════
+function TopBar({ view, health, onMenu, menuRef }) {
+  return (
+    <header className="topbar">
+      <button ref={menuRef} type="button" className="icon-btn menu-btn" onClick={onMenu} aria-label="Open navigation">
+        <MenuIcon size={18} />
+      </button>
+      <div className="topbar-brand">
+        <BrandMark size={40} />
+        <Wordmark />
+      </div>
+      <span className="crumb-sep" aria-hidden="true">/</span>
+      <span className="crumb">{view === "tools" ? "AI Tools" : "AI Assistant"}</span>
+
+      <div className="topbar-right">
+        <span className="model-pill" title="Language model that writes the answers">GPT-OSS 120B</span>
+        <span className={`health health-${health}`} role="status" title="Backend status from /health">
+          <span className="health-dot" aria-hidden="true" />
+          <span className="health-label">{HEALTH_LABELS[health]}</span>
+        </span>
+      </div>
+    </header>
+  );
+}
+
 // ═══════════════════════════════════════════════════════
 // ACCOUNT MENU (sidebar footer)
 // ═══════════════════════════════════════════════════════
-// Log out sits one click behind the account row (as in ChatGPT) so a stray
-// click can't end the session. Closes on outside click or Escape.
+// Log out sits one click behind the account row so a stray click can't end
+// the session. Closes on outside click or Escape; focus returns to the row.
 function AccountMenu({ email, onLogout }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const rootRef = useRef(null);
+  const triggerRef = useRef(null);
 
   useEffect(() => {
     if (!open) return;
     const onPointer = e => { if (!rootRef.current?.contains(e.target)) setOpen(false); };
-    const onKey = e => { if (e.key === "Escape") setOpen(false); };
+    const onKey = e => {
+      if (e.key === "Escape") { e.stopPropagation(); setOpen(false); triggerRef.current?.focus(); }
+    };
     document.addEventListener("mousedown", onPointer);
     document.addEventListener("touchstart", onPointer);
     document.addEventListener("keydown", onKey);
@@ -143,30 +210,27 @@ function AccountMenu({ email, onLogout }) {
   return (
     <div className="account" ref={rootRef}>
       {open && (
-        <div className="account-menu" role="menu">
+        <div className="account-menu" role="menu" aria-label="Account">
           <div className="account-menu-label">Signed in as</div>
           <div className="account-menu-email" title={email}>{email}</div>
           <div className="account-menu-sep" />
           <button className="account-menu-item danger" role="menuitem" onClick={handleLogout} disabled={busy} autoFocus>
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><polyline points="16 17 21 12 16 7" /><line x1="21" y1="12" x2="9" y2="12" />
-            </svg>
-            {busy ? "Logging out…" : "Log out"}
+            <LogoutIcon size={15} />
+            {busy ? "Signing out…" : "Sign out"}
           </button>
         </div>
       )}
       <button
+        ref={triggerRef}
         className={`account-trigger ${open ? "open" : ""}`}
         onClick={() => setOpen(o => !o)}
         aria-haspopup="menu"
         aria-expanded={open}
         title={email}
       >
-        <span className="account-avatar">{(email || "?")[0].toUpperCase()}</span>
+        <span className="account-avatar" aria-hidden="true">{(email || "?")[0].toUpperCase()}</span>
         <span className="account-email">{email}</span>
-        <svg className="account-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-          <polyline points="18 15 12 9 6 15" />
-        </svg>
+        <ChevronUpIcon size={14} />
       </button>
     </div>
   );
@@ -175,48 +239,197 @@ function AccountMenu({ email, onLogout }) {
 // ═══════════════════════════════════════════════════════
 // SIDEBAR
 // ═══════════════════════════════════════════════════════
-function Sidebar({ threads, titles, threadId, onNew, onLoad, onDelete, isOpen, onClose }) {
+// One row in "Recent conversations": open, rename inline, delete.
+// Rename: pencil button (or double-click the name) → text field.
+// Enter or clicking away saves; Escape cancels. Max 80 characters (the
+// backend enforces the same limit).
+function ConversationItem({ tid, title, active, onLoad, onDelete, onRename }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(title);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const inputRef = useRef(null);
+  const renameBtnRef = useRef(null);
+  const skipBlurRef = useRef(false);
+
+  const startEdit = () => {
+    skipBlurRef.current = false;
+    setDraft(title);
+    setError(null);
+    setEditing(true);
+    requestAnimationFrame(() => inputRef.current?.select());
+  };
+
+  const finish = (focusBack = true) => {
+    setEditing(false);
+    if (focusBack) requestAnimationFrame(() => renameBtnRef.current?.focus());
+  };
+
+  const commit = async () => {
+    const next = draft.replace(/\s+/g, " ").trim();
+    if (!next || next === title) { finish(); return; }
+    setSaving(true);
+    try {
+      await onRename(tid, next);
+      setError(null);
+      finish();
+    } catch (err) {
+      setError(err.message || "Couldn't rename this conversation.");
+      requestAnimationFrame(() => inputRef.current?.focus());
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (editing) {
+    return (
+      <div className="t-item">
+        <div className="t-row editing">
+          <input
+            ref={inputRef}
+            className="t-edit"
+            value={draft}
+            maxLength={80}
+            disabled={saving}
+            aria-label="Conversation name"
+            aria-invalid={error ? true : undefined}
+            aria-describedby={error ? `rename-err-${tid}` : undefined}
+            onChange={e => setDraft(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === "Enter") { e.preventDefault(); skipBlurRef.current = true; commit(); }
+              if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); skipBlurRef.current = true; setError(null); finish(); }
+            }}
+            onBlur={() => {
+              if (skipBlurRef.current) { skipBlurRef.current = false; return; }
+              if (!saving) commit();
+            }}
+          />
+          {saving && <span className="spinner small t-saving" aria-hidden="true" />}
+        </div>
+        {error && <div className="t-error" id={`rename-err-${tid}`} role="alert">{error}</div>}
+      </div>
+    );
+  }
+
+  return (
+    <div className="t-item">
+      <div className={`t-row ${active ? "active" : ""}`}>
+        <button
+          className="t-btn"
+          onClick={() => onLoad(tid)}
+          onDoubleClick={startEdit}
+          title={title}
+          aria-current={active ? "true" : undefined}
+        >
+          {title}
+        </button>
+        <div className="t-actions">
+          <button
+            ref={renameBtnRef}
+            className="t-act"
+            onClick={e => { e.stopPropagation(); startEdit(); }}
+            aria-label={`Rename conversation: ${title}`}
+            title="Rename"
+          >
+            <PencilIcon size={14} />
+          </button>
+          <button
+            className="t-act danger"
+            onClick={e => { e.stopPropagation(); onDelete(tid); }}
+            aria-label={`Delete conversation: ${title}`}
+            title="Delete"
+          >
+            <TrashIcon size={14} />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Sidebar({
+  threads, titles, threadId, onNew, onLoad, onDelete, onRename, isOpen, onClose,
+  view, onView, historyStatus, onRetryHistory,
+}) {
   const { user, logout } = useAuth();
+  const newBtnRef = useRef(null);
+
+  // Mobile drawer: move focus in on open, close on Escape (spec §10).
+  useEffect(() => {
+    if (!isOpen) return;
+    newBtnRef.current?.focus();
+    const onKey = e => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [isOpen, onClose]);
+
+  const recent = [...threads].reverse();
 
   return (
     <>
-      <div className={`overlay ${isOpen ? "open" : ""}`} onClick={onClose} />
-      <aside className={`sidebar ${isOpen ? "open" : ""}`}>
-
-        {/* Logo */}
-        <div className="sidebar-logo">
-          <div className="logo-orb">🧠</div>
-          <div>
-            <div className="logo-name">Synapse AI</div>
-            <div className="logo-tag">Powered by GPT-OSS 120B</div>
+      <div className={`overlay ${isOpen ? "open" : ""}`} onClick={onClose} aria-hidden="true" />
+      <aside className={`sidebar ${isOpen ? "open" : ""}`} aria-label="Workspace navigation">
+        <div className="drawer-head">
+          <div className="topbar-brand">
+            <BrandMark size={32} />
+            <Wordmark />
           </div>
+          <button type="button" className="icon-btn" onClick={onClose} aria-label="Close navigation">
+            <CloseIcon size={18} />
+          </button>
         </div>
 
-        {/* New chat */}
-        <button className="btn-new" onClick={onNew}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-          </svg>
-          New Conversation
+        <button ref={newBtnRef} className="btn-primary btn-new" onClick={onNew}>
+          <PlusIcon size={16} />
+          New conversation
         </button>
 
-        {/* History */}
-        <nav className="history">
-          <span className="h-label">Recent Chats</span>
-          {[...threads].reverse().map(tid => (
-            <div className="t-row" key={tid}>
-              <button
-                className={`t-btn ${tid === threadId ? "active" : ""}`}
-                onClick={() => { onLoad(tid); onClose?.(); }}
-                title={titles[tid] || tid}
-              >
-                {titles[tid] || "New Conversation"}
-              </button>
-              <button className="t-del" onClick={e => { e.stopPropagation(); onDelete(tid); }}>✕</button>
-            </div>
+        <nav className="side-nav" aria-label="Workspace">
+          <span className="side-label">Workspace</span>
+          <button
+            type="button"
+            className={`nav-item ${view === "assistant" ? "active" : ""}`}
+            aria-current={view === "assistant" ? "page" : undefined}
+            onClick={() => onView("assistant")}
+          >
+            <ChatIcon size={16} /> AI Assistant
+          </button>
+          <button
+            type="button"
+            className={`nav-item ${view === "tools" ? "active" : ""}`}
+            aria-current={view === "tools" ? "page" : undefined}
+            onClick={() => onView("tools")}
+          >
+            <ToolsIcon size={16} /> AI Tools
+          </button>
+        </nav>
+
+        <nav className="history" aria-label="Recent conversations">
+          <span className="side-label">Recent conversations</span>
+          {recent.map(tid => (
+            <ConversationItem
+              key={tid}
+              tid={tid}
+              title={titles[tid] || "New conversation"}
+              active={tid === threadId && view === "assistant"}
+              onLoad={onLoad}
+              onDelete={onDelete}
+              onRename={onRename}
+            />
           ))}
-          {threads.length === 0 && (
-            <p style={{ fontSize: 12, color: "var(--text-dim)", padding: "10px 8px" }}>No conversations yet</p>
+          {threads.length === 0 && historyStatus === "loading" && (
+            <div className="history-state" role="status">
+              <span className="spinner small" aria-hidden="true" /> Loading conversations…
+            </div>
+          )}
+          {threads.length === 0 && historyStatus === "ready" && (
+            <div className="history-state">No conversations yet</div>
+          )}
+          {historyStatus === "error" && (
+            <div className="history-state error" role="alert">
+              Couldn't load conversations.
+              <button type="button" className="link-btn" onClick={onRetryHistory}>Try again</button>
+            </div>
           )}
         </nav>
 
@@ -227,102 +440,178 @@ function Sidebar({ threads, titles, threadId, onNew, onLoad, onDelete, isOpen, o
 }
 
 // ═══════════════════════════════════════════════════════
-// HERO
+// EMPTY STATE
 // ═══════════════════════════════════════════════════════
-const CARDS = [
-  { icon: "🐍", title: "Write Python Code",   desc: "Scripts, automation, data pipelines — generated instantly.", prompt: "Write a Python script to automate a daily task." },
-  { icon: "📊", title: "Analyze Data",         desc: "Pandas, visualizations, stats — explained step by step.",    prompt: "How do I use Pandas to analyze a CSV file?" },
-  { icon: "💡", title: "Explain Any Concept", desc: "Complex ideas broken down into clear, simple language.",     prompt: "Explain how neural networks work in simple terms." },
+// Starters put an editable prompt in the composer — they never send on their
+// own (spec §05). The trailing text is left open for the user to finish.
+const STARTERS = [
+  { icon: SearchIcon, title: "Research a topic",  desc: "Explore a subject in depth",  prompt: "Research the latest developments in " },
+  { icon: CodeIcon,   title: "Help me with code", desc: "Write, review or debug",      prompt: "Help me with this code:\n\n" },
+  { icon: BookIcon,   title: "Explain a concept", desc: "Understand it clearly",       prompt: "Explain in simple terms how " },
+  { icon: SparkIcon,  title: "Help me plan",      desc: "Organise tasks and ideas",    prompt: "Help me plan " },
 ];
 
-function Hero({ onPrompt }) {
+function EmptyState({ onPrompt }) {
   return (
     <div className="hero">
-      <div className="hero-head">
-        <div className="hero-eyebrow">Multi-Purpose AI Assistant</div>
-        <h1 className="hero-title">What can I help you<br /><span>build today?</span></h1>
-        <p className="hero-sub">Ask anything — code, data, concepts, or just a conversation.</p>
-      </div>
-      <div className="hero-cards">
-        {CARDS.map(c => (
-          <div className="hero-card" key={c.title} onClick={() => onPrompt(c.prompt)}>
-            <span className="c-icon">{c.icon}</span>
-            <span className="c-title">{c.title}</span>
-            <span className="c-desc">{c.desc}</span>
-            <span className="c-arrow">→</span>
-          </div>
-        ))}
+      <div className="hero-inner">
+        <BrandMark size={48} />
+        <div className="eyebrow">Your AI workspace</div>
+        <h1 className="hero-title">What can we explore today?</h1>
+        <p className="hero-sub">Ask anything. Connect ideas. Get things done.</p>
+        <div className="starter-grid">
+          {STARTERS.map(({ icon: Icon, title, desc, prompt }) => (
+            <button type="button" className="starter-card" key={title} onClick={() => onPrompt(prompt)}>
+              <span className="starter-icon"><Icon size={17} /></span>
+              <span className="starter-title">{title}</span>
+              <span className="starter-desc">{desc}</span>
+            </button>
+          ))}
+        </div>
       </div>
     </div>
   );
 }
 
 // ═══════════════════════════════════════════════════════
-// MESSAGE
+// MESSAGE CONTENT
 // ═══════════════════════════════════════════════════════
-function renderCode({ inline, className, children, ...props }, plain) {
-  const match = /language-(\w+)/.exec(className || "");
-  return !inline && match
-    ? <SyntaxHighlighter style={oneDark} language={plain ? "text" : match[1]} PreTag="div"
-        customStyle={{ background: "#04070d", border: "1px solid #1c2a3a", borderRadius: "10px", fontSize: "13px", margin: "10px 0" }} {...props}>
-        {String(children).replace(/\n$/, "")}
-      </SyntaxHighlighter>
-    : <code className={className} {...props}>{children}</code>;
+function CodeBlock({ language, code, highlight }) {
+  const [copied, setCopied] = useState(null); // null | "ok" | "err"
+  const timerRef = useRef(null);
+  useEffect(() => () => clearTimeout(timerRef.current), []);
+
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(code); setCopied("ok"); }
+    catch { setCopied("err"); }
+    clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => setCopied(null), 1800);
+  };
+
+  return (
+    <div className="code-block">
+      <div className="code-head">
+        <span className="code-lang">{language || "text"}</span>
+        <button type="button" className="code-copy" onClick={copy} aria-label="Copy code">
+          {copied === "ok" ? <><CheckIcon size={13} /> Copied</> : copied === "err" ? "Copy failed" : <><CopyIcon size={13} /> Copy</>}
+        </button>
+      </div>
+      {highlight && language
+        ? <SyntaxHighlighter style={oneDark} language={language} PreTag="div" className="code-body"
+            customStyle={{ margin: 0, background: "transparent", padding: "14px 16px", fontSize: "13px", lineHeight: 1.6 }}
+            codeTagProps={{ style: { fontFamily: "var(--mono)" } }}>
+            {code}
+          </SyntaxHighlighter>
+        : <pre className="code-body code-plain"><code>{code}</code></pre>}
+    </div>
+  );
 }
-const CodeBlock = props => renderCode(props, false);
-// While an answer streams, code renders as "text" (no Prism tokenizing).
-// Re-highlighting the whole growing block on every frame blocked the main
-// thread for nearly the entire stream, which is what made scrolling lurch.
-// Same box, font and size, so nothing shifts when the colours appear at the end.
-const StreamingCodeBlock = props => renderCode(props, true);
-const MARKDOWN_COMPONENTS = { code: CodeBlock };
-const STREAMING_MARKDOWN_COMPONENTS = { code: StreamingCodeBlock };
+
+// react-markdown v9 renders fenced code as <pre><code class="language-x">.
+// We take over <pre> to add the language label + copy button.
+// While an answer streams, code renders as plain text (no Prism tokenizing):
+// re-highlighting the whole growing block every frame blocked the main thread
+// and made scrolling lurch. Same box, font and size, so nothing shifts when
+// colours appear at the end.
+function makePre(highlight) {
+  return function Pre({ children }) {
+    const codeEl = React.Children.toArray(children)[0];
+    const className = codeEl?.props?.className || "";
+    const match = /language-([\w+#-]+)/.exec(className);
+    const code = String(codeEl?.props?.children ?? "").replace(/\n$/, "");
+    return <CodeBlock language={match ? match[1] : ""} code={code} highlight={highlight} />;
+  };
+}
+
+const MdLink = ({ node, ...props }) => <a {...props} target="_blank" rel="noopener noreferrer" />;
+const MdTable = ({ node, ...props }) => (
+  <div className="table-wrap" tabIndex={0} role="region" aria-label="Table">
+    <table {...props} />
+  </div>
+);
+
+const REMARK_PLUGINS = [remarkGfm];
+const MARKDOWN_COMPONENTS = { pre: makePre(true), a: MdLink, table: MdTable };
+const STREAMING_MARKDOWN_COMPONENTS = { pre: makePre(false), a: MdLink, table: MdTable };
+
+function ErrorMessage({ content, restored }) {
+  const detail = content.slice(ERROR_PREFIX.length).trim();
+  return (
+    <div className="inline-alert error" role="alert">
+      <AlertIcon size={16} />
+      <div>
+        <div className="alert-title">Something went wrong while generating a response.</div>
+        {detail && <div className="alert-detail">{detail}</div>}
+        {restored && <div className="alert-detail">Your message is back in the composer — press Send to try again.</div>}
+      </div>
+    </div>
+  );
+}
 
 // memo: while an answer streams, ChatApp re-renders every frame — without
 // this, every earlier message re-parsed its markdown and re-highlighted its
 // code each time, so long chats with code got slower and choppier.
-const Message = React.memo(function Message({ role, content, streaming, attachmentName }) {
-  const isUser = role === "user";
+const Message = React.memo(function Message({ role, content, streaming, attachmentName, restored }) {
+  if (role === "user") {
+    return (
+      <div className="msg msg-user">
+        <div className="user-bubble">
+          {attachmentName && <div className="msg-attachment"><PaperclipIcon size={13} /> {attachmentName}</div>}
+          <span className="user-text">{content}</span>
+        </div>
+      </div>
+    );
+  }
+  const isError = typeof content === "string" && content.startsWith(ERROR_PREFIX);
   return (
-    <div className={`msg ${isUser ? "msg-user" : "msg-ai"}`}>
-      <div className="avatar">{isUser ? "🧑‍💻" : "🧠"}</div>
-      <div className="bubble">
-        {attachmentName && <div className="msg-attachment">📎 {attachmentName}</div>}
-        {isUser
-          ? <span style={{ whiteSpace: "pre-wrap" }}>{content}</span>
-          : <><ReactMarkdown components={streaming ? STREAMING_MARKDOWN_COMPONENTS : MARKDOWN_COMPONENTS}>{content}</ReactMarkdown>{streaming && <span className="cursor" />}</>
-        }
+    <div className="msg msg-ai">
+      <BrandMark size={28} />
+      <div className="ai-body">
+        {isError
+          ? <ErrorMessage content={content} restored={restored} />
+          : <div className="markdown">
+              <ReactMarkdown remarkPlugins={REMARK_PLUGINS} components={streaming ? STREAMING_MARKDOWN_COMPONENTS : MARKDOWN_COMPONENTS}>
+                {content}
+              </ReactMarkdown>
+              {streaming && <span className="cursor" aria-hidden="true" />}
+            </div>}
       </div>
     </div>
   );
 });
 
-function Typing({ label }) {
+// Shown while a request is in flight and no answer text has arrived yet.
+// The label only changes when the backend streams a status event.
+function ToolActivity({ label }) {
   return (
     <div className="msg msg-ai">
-      <div className="avatar">🧠</div>
-      <div className="bubble">
-        {label && <div className="tool-status-label">{label}</div>}
-        <div className="dots"><span /><span /><span /></div>
+      <BrandMark size={28} />
+      <div className="ai-body">
+        <div className="tool-activity" role="status">
+          <span className="spinner small" aria-hidden="true" />
+          <span>{label || "Thinking…"}</span>
+        </div>
       </div>
     </div>
   );
 }
 
 // ═══════════════════════════════════════════════════════
-// INPUT BAR
+// COMPOSER
 // ═══════════════════════════════════════════════════════
 function VoiceStatusBar({ voiceMode, listening, speaking, onStop, voiceOptions, selectedVoice, onVoiceChange }) {
   if (!voiceMode) return null;
-  let label = "Voice mode — speak when ready";
+  let label;
   if (listening) label = "Listening…";
-  else if (speaking) label = "Speaking… tap mic to interrupt";
-  else label = "Stand by — listening again in ~1.2s after reply";
+  else if (speaking) label = "Speaking… tap the mic to interrupt";
+  else label = "Standing by — listening again shortly after the reply";
   return (
-    <div className="voice-status-bar">
-      <span className={`voice-pulse ${listening ? "listen" : speaking ? "speak" : ""}`} />
+    <div className="voice-status-bar" role="status">
+      <span className={`voice-pulse ${listening ? "listen" : speaking ? "speak" : ""}`} aria-hidden="true" />
       <span className="voice-status-text">{label}</span>
+      <label className="sr-only" htmlFor="voice-select">Voice</label>
       <select
+        id="voice-select"
         className="voice-select"
         value={selectedVoice}
         onChange={e => onVoiceChange(e.target.value)}
@@ -333,12 +622,12 @@ function VoiceStatusBar({ voiceMode, listening, speaking, onStop, voiceOptions, 
           <option key={v.id} value={v.id}>{v.label}</option>
         ))}
       </select>
-      <button type="button" className="voice-stop-btn" onClick={onStop}>Stop voice</button>
+      <button type="button" className="btn-ghost small" onClick={onStop}>Stop voice</button>
     </div>
   );
 }
 
-function InputBar({
+function Composer({
   value, onChange, onSend, disabled,
   voiceSupported, voiceMode, listening, speaking,
   onVoiceToggle, inputRef,
@@ -346,77 +635,89 @@ function InputBar({
   onAttachClick, onRemoveAttachment, fileInputRef, onFileSelect,
   onStop,
 }) {
-  const ref = inputRef || useRef(null);
   useEffect(() => {
-    if (ref.current) { ref.current.style.height = "auto"; ref.current.style.height = `${ref.current.scrollHeight}px`; }
-  }, [value]);
+    const el = inputRef.current;
+    if (el) { el.style.height = "auto"; el.style.height = `${el.scrollHeight}px`; }
+  }, [value, inputRef]);
   const canSend = (value.trim() || attachment) && !disabled && !uploading;
   const submit = () => { if (canSend) onSend(value, { fromVoice: false }); };
   return (
-    <div className="input-zone">
+    <div className="composer-zone">
       {attachment && (
         <div className="attachment-chip">
-          <span>{attachment.kind === "image" ? "🖼️" : "📄"}</span>
+          <span className="attachment-icon">{attachment.kind === "image" ? <ImageIcon size={15} /> : <FileIcon size={15} />}</span>
           <span className="attachment-name">{attachment.filename}</span>
-          <button type="button" className="attachment-remove" onClick={onRemoveAttachment} aria-label="Remove attachment">✕</button>
+          <button type="button" className="attachment-remove" onClick={onRemoveAttachment} aria-label={`Remove attachment ${attachment.filename}`}>
+            <CloseIcon size={14} />
+          </button>
         </div>
       )}
-      {uploading && <div className="attachment-chip attachment-loading">Reading file…</div>}
-      {uploadError && <div className="file-error-banner">{uploadError}</div>}
-      <div className={`input-shell ${voiceMode ? "voice-active" : ""} ${disabled ? "is-busy" : ""}`}>
+      {uploading && (
+        <div className="attachment-chip attachment-loading" role="status">
+          <span className="spinner small" aria-hidden="true" /> Reading file…
+        </div>
+      )}
+      {uploadError && <div className="inline-alert error composer-alert" role="alert"><AlertIcon size={15} /> {uploadError}</div>}
+
+      <div className={`composer ${voiceMode ? "voice-active" : ""} ${disabled ? "is-busy" : ""}`} onClick={e => { if (e.target === e.currentTarget) inputRef.current?.focus(); }}>
         <input
           type="file"
           ref={fileInputRef}
           onChange={onFileSelect}
           accept=".pdf,.docx,image/*"
-          style={{ display: "none" }}
+          hidden
         />
         <button
           type="button"
-          className="attach-btn"
+          className="icon-btn composer-btn"
           onClick={onAttachClick}
           disabled={disabled || uploading}
-          title="Attach a PDF, DOCX, or image"
-          aria-label="Attach file"
+          title="Attach a PDF, DOCX or image"
+          aria-label="Attach a PDF, DOCX or image"
         >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-          </svg>
+          <PaperclipIcon size={18} />
         </button>
         {voiceSupported && (
           <button
             type="button"
-            className={`mic-btn ${voiceMode ? "on" : ""} ${listening ? "listen" : ""} ${speaking ? "speak" : ""}`}
+            className={`icon-btn composer-btn mic-btn ${voiceMode ? "on" : ""} ${listening ? "listen" : ""} ${speaking ? "speak" : ""}`}
             onClick={onVoiceToggle}
             disabled={disabled && !voiceMode}
-            title={voiceMode ? "Exit voice mode" : "Start voice chat (same tools & memory)"}
+            title={voiceMode ? "Exit voice mode" : "Start voice chat (same tools and memory)"}
             aria-label={voiceMode ? "Exit voice mode" : "Start voice chat"}
+            aria-pressed={voiceMode}
           >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-              <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-              <line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
-            </svg>
+            <MicIcon size={18} />
           </button>
         )}
-        <textarea ref={ref} rows={1} className="input-field"
-          placeholder={voiceMode ? "Voice mode — speak or type a message…" : "Message Synapse AI…  (Enter to send, Shift+Enter for newline)"}
-          value={value} disabled={disabled && !voiceMode}
+        <label className="sr-only" htmlFor="composer-input">Message SynapseAI</label>
+        <textarea
+          id="composer-input"
+          ref={inputRef}
+          rows={1}
+          className="input-field"
+          placeholder={voiceMode ? "Voice mode — speak or type a message…" : "Message SynapseAI…"}
+          value={value}
+          disabled={disabled && !voiceMode}
           onChange={e => onChange(e.target.value)}
           onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } }}
+          aria-describedby="composer-hint"
         />
         {disabled
           // While an answer is generating (or the model is still thinking /
-          // using tools) the send button becomes Stop, as in ChatGPT.
+          // using tools) the send button becomes Stop.
           ? <button type="button" className="send-btn stop-btn" onClick={onStop} title="Stop generating" aria-label="Stop generating">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2.5" /></svg>
+              <StopIcon size={15} />
             </button>
-          : <button className="send-btn" onClick={submit} disabled={!canSend} aria-label="Send message">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
+          : <button type="button" className="send-btn" onClick={submit} disabled={!canSend} aria-label="Send message" title="Send (Enter)">
+              <SendIcon size={17} />
             </button>
         }
       </div>
-      <p className="input-hint">Synapse AI runs on the cloud — your conversations are safe with us.</p>
+      <p className="composer-hint" id="composer-hint">
+        AI-generated responses may be inaccurate. Verify important information.
+        <span className="composer-keys"> Enter to send · Shift+Enter for a new line</span>
+      </p>
     </div>
   );
 }
@@ -429,11 +730,18 @@ function ChatApp() {
   const [messages,    setMessages]    = useState([]);
   const [threads,     setThreads]     = useState([]);
   const [titles,      setTitles]      = useState({});
+  const titlesRef = useRef(titles);
+  titlesRef.current = titles;
   const [streaming,   setStreaming]   = useState(false);
   const [streamMsg,   setStreamMsg]   = useState("");
   const [toolStatus,  setToolStatus]  = useState(null);
   const [input,       setInput]       = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [view,        setView]        = useState("assistant"); // "assistant" | "tools"
+  const [historyStatus, setHistoryStatus] = useState("loading"); // loading | ready | error
+  const [historyReload, setHistoryReload] = useState(0);
+  const [health,      setHealth]      = useState("checking");
+  const [announce,    setAnnounce]    = useState("");          // screen-reader live region
   const [voiceMode,   setVoiceMode]   = useState(false);
   const [listening,   setListening]   = useState(false);
   const [speaking,    setSpeaking]    = useState(false);
@@ -448,12 +756,14 @@ function ChatApp() {
 
   const voiceRef = useRef(null);
   const inputElRef = useRef(null);
+  const menuBtnRef = useRef(null);
+  const sidebarOpenRef = useRef(false);
+  sidebarOpenRef.current = sidebarOpen;
   const voiceSupported = isVoiceSupported();
 
-  // ✅ FIX: threadMessages stores the FULL message history per thread
-  // locally in the frontend — completely independent from backend state.
-  // Backend can delete messages for memory management, but the UI
-  // always shows the complete conversation the user has seen.
+  // threadMessages stores the FULL message history per thread locally in the
+  // frontend — independent from backend state. The backend can trim messages
+  // for memory management, but the UI always shows the complete conversation.
   const [threadMessages, setThreadMessages] = useState({});
 
   const streamRef = useRef("");
@@ -465,20 +775,33 @@ function ChatApp() {
   const prevTopRef = useRef(0);
   const autoUntilRef = useRef(0);        // ignore scroll events during our smooth scroll
 
-  // Load threads on mount (retry while backend warms up — embeddings can take 15–30s)
+  const say = useCallback(msg => {
+    // Toggle a zero-width char so repeating the same text is still announced.
+    setAnnounce(prev => (prev === msg ? `${msg}​` : msg));
+  }, []);
+
+  // Load threads (retry while backend warms up — embeddings can take 15–30s)
   useEffect(() => {
     let cancelled = false;
     let retryTimer = null;
+    setHistoryStatus("loading");
 
     const loadThreads = (attempt = 0) => {
       api.getThreads()
-        .then(ids => {
+        .then(({ threads: ids, titles: stored }) => {
           if (cancelled) return;
-          setThreads(ids);
+          // Keep any conversation started locally while history was loading.
+          setThreads(p => [...ids, ...p.filter(t => !ids.includes(t))]);
+          // Stored titles show immediately; history fills in the rest.
+          setTitles(p => ({ ...p, ...stored }));
+          setHistoryStatus("ready");
           ids.forEach(tid =>
             api.getHistory(tid).then(h => {
               if (cancelled) return;
-              setTitles(p => ({ ...p, [tid]: h.title || "New Conversation" }));
+              // Don't replace a real title (stored, or renamed meanwhile).
+              setTitles(p => (p[tid] && p[tid] !== "New Conversation")
+                ? p
+                : { ...p, [tid]: h.title || "New Conversation" });
               setThreadMessages(p => {
                 if (p[tid]) return p;
                 return { ...p, [tid]: h.messages || [] };
@@ -487,7 +810,8 @@ function ChatApp() {
           );
         })
         .catch(() => {
-          if (cancelled || attempt >= 12) return;
+          if (cancelled) return;
+          if (attempt >= 12) { setHistoryStatus("error"); return; }
           retryTimer = setTimeout(() => loadThreads(attempt + 1), 2000);
         });
     };
@@ -497,6 +821,24 @@ function ChatApp() {
       cancelled = true;
       if (retryTimer) clearTimeout(retryTimer);
     };
+  }, [historyReload]);
+
+  // Backend status for the top bar — retried while the Space wakes up.
+  useEffect(() => {
+    let cancelled = false;
+    let timer = null;
+    const check = (attempt = 0) => {
+      fetch(`${BASE}/health`)
+        .then(r => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+        .then(d => { if (!cancelled) setHealth(d.ok ? "ok" : "degraded"); })
+        .catch(() => {
+          if (cancelled) return;
+          if (attempt < 6) timer = setTimeout(() => check(attempt + 1), 5000);
+          else setHealth("down");
+        });
+    };
+    check();
+    return () => { cancelled = true; clearTimeout(timer); };
   }, []);
 
   // Auto-scroll. Not scrollIntoView-per-token: during fast streaming (code)
@@ -578,9 +920,26 @@ function ChatApp() {
   const abortRef = useRef(null);          // AbortController of the in-flight answer
   const stopRequestedRef = useRef(false); // distinguishes Stop from a voice interruption
 
+  // Mobile drawer close — returns focus to the menu button that opened it.
+  const closeSidebar = useCallback(() => {
+    if (!sidebarOpenRef.current) return;
+    setSidebarOpen(false);
+    requestAnimationFrame(() => menuBtnRef.current?.focus());
+  }, []);
+
+  const focusComposer = useCallback((caretToEnd = false) => {
+    requestAnimationFrame(() => {
+      const el = inputElRef.current;
+      if (!el) return;
+      el.focus();
+      if (caretToEnd) el.setSelectionRange(el.value.length, el.value.length);
+    });
+  }, []);
+
   const loadThread = useCallback((tid) => {
-    // ✅ FIX: Never re-fetch from backend when switching threads.
-    // Always use our local threadMessages copy which has the full history.
+    // Never re-fetch from backend when switching threads — use the local
+    // threadMessages copy, which has the full history.
+    setView("assistant");
     if (tid === threadId) return;
     followRef.current = true;
     setThreadId(tid);
@@ -591,20 +950,35 @@ function ChatApp() {
     const tid = await api.newThread();
     setThreadId(tid);
     setMessages([]);
+    setView("assistant");
     setThreads(p => [...p, tid]);
     setTitles(p => ({ ...p, [tid]: "New Conversation" }));
     setThreadMessages(p => ({ ...p, [tid]: [] }));
-    setSidebarOpen(false);
-  }, []);
+    closeSidebar();
+    focusComposer();
+  }, [closeSidebar, focusComposer]);
 
   const removeThread = useCallback(async (tid) => {
     await api.deleteThread(tid);
     setThreads(p => p.filter(t => t !== tid));
     setTitles(p => { const n = { ...p }; delete n[tid]; return n; });
-    // ✅ Also clean up local message store
     setThreadMessages(p => { const n = { ...p }; delete n[tid]; return n; });
     if (tid === threadId) { setThreadId(uuid()); setMessages([]); }
   }, [threadId]);
+
+  // Optimistic rename; restores the previous title if the server refuses.
+  const renameThread = useCallback(async (tid, title) => {
+    const previous = titlesRef.current[tid];
+    setTitles(p => ({ ...p, [tid]: title }));
+    try {
+      const saved = await api.renameThread(tid, title);
+      setTitles(p => ({ ...p, [tid]: saved || title }));
+      say("Conversation renamed.");
+    } catch (err) {
+      setTitles(p => ({ ...p, [tid]: previous }));
+      throw err;
+    }
+  }, [say]);
 
   const send = useCallback(async (text, options = {}) => {
     const { fromVoice = false } = options;
@@ -629,7 +1003,7 @@ function ChatApp() {
 
     followRef.current = true;   // sending always brings the conversation back into view
 
-    // ✅ FIX: Append user message both to display state AND local thread store
+    // Append the user message both to display state AND the local thread store
     const displayText = text.trim() || `Sent ${currentAttachment?.filename}`;
     const userMsg = { role: "user", content: displayText, attachmentName: currentAttachment?.filename };
     setMessages(p => {
@@ -643,12 +1017,14 @@ function ChatApp() {
       ? `${text.trim() ? text.trim() + "\n\n" : ""}[Attached ${currentAttachment.kind}: ${currentAttachment.filename}]\n"""\n${currentAttachment.content}\n"""`
       : text;
 
-    // Auto-title on first message
+    // Auto-title on the first message. The backend stores it (short messages
+    // become their own title, no LLM call) and never replaces a rename.
     const isFirst = messages.filter(m => m.role === "user").length === 0;
     if (isFirst) {
-      displayText.length >= 15
-        ? api.getSummary(displayText).then(t => setTitles(p => ({ ...p, [threadId]: t })))
-        : setTitles(p => ({ ...p, [threadId]: "New Conversation" }));
+      const tid = threadId;
+      api.getSummary(displayText, tid)
+        .then(t => setTitles(p => ({ ...p, [tid]: t })))
+        .catch(() => { /* title stays "New conversation"; history retries it */ });
     }
 
     setStreaming(true); streamRef.current = ""; setStreamMsg(""); setToolStatus(null);
@@ -682,8 +1058,7 @@ function ChatApp() {
         },
         status => {
           // Adaptive-loop statuses (evaluating/refining/finalizing) reuse the
-          // same lightweight "typing label" UI as using_tools — no new panel,
-          // just a different label while no answer text has streamed yet.
+          // same activity line as using_tools, while no answer text has streamed yet.
           if (status === "using_tools" || status === "evaluating" || status === "refining" || status === "finalizing") {
             setToolStatus(status);
             if (fromVoice && status === "using_tools") voiceRef.current?.speakStatus("One moment.");
@@ -697,19 +1072,20 @@ function ChatApp() {
         if (tail.length >= 8) voiceRef.current.enqueueSpeech(tail);
       }
 
-      if (full) {
-        // ✅ FIX: Append assistant message both to display state AND local thread store
-        const assistantMsg = { role: "assistant", content: full };
-        setMessages(p => {
-          const updated = [...p, assistantMsg];
-          setThreadMessages(prev => ({ ...prev, [threadId]: updated }));
-          return updated;
-        });
-      }
+      // Spec §06: an empty answer is a recoverable error, not a blank bubble.
+      if (!full) throw new Error("The assistant didn't return a response.");
+
+      const assistantMsg = { role: "assistant", content: full };
+      setMessages(p => {
+        const updated = [...p, assistantMsg];
+        setThreadMessages(prev => ({ ...prev, [threadId]: updated }));
+        return updated;
+      });
+      say("Response complete.");
     } catch (err) {
       if (err.name === "AbortError") {
-        // Stop: keep whatever was already shown, like ChatGPT. (A voice
-        // interruption discards it — the user is already saying something new.)
+        // Stop: keep whatever was already shown. (A voice interruption
+        // discards it — the user is already saying something new.)
         const partial = streamRef.current;
         if (stopRequestedRef.current && partial.trim()) {
           setMessages(p => {
@@ -718,14 +1094,23 @@ function ChatApp() {
             return updated;
           });
         }
+        if (stopRequestedRef.current) say("Generation stopped.");
         return;
       }
-      const errMsg = { role: "assistant", content: `⚠️ **Error:** ${err.message}` };
+      // Keep the user's input (spec §07): put the text — and attachment —
+      // back in the composer so retrying is one click on Send.
+      const restored = !fromVoice;
+      if (restored) {
+        setInput(cur => cur || text);
+        if (currentAttachment) setAttachment(a => a || currentAttachment);
+      }
+      const errMsg = { role: "assistant", content: `${ERROR_PREFIX}${err.message}`, restored };
       setMessages(p => {
         const updated = [...p, errMsg];
         setThreadMessages(prev => ({ ...prev, [threadId]: updated }));
         return updated;
       });
+      say("The response failed.");
       if (fromVoice) voiceRef.current?.speakStatus("Sorry, something went wrong.");
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
@@ -734,12 +1119,11 @@ function ChatApp() {
       if (fromVoice) voiceRef.current?.notifyAssistantTurnComplete();
       if (!fromVoice) {
         // Re-focus the input — a disabled→enabled textarea doesn't regain
-        // browser focus automatically, so without this you have to click
-        // back into the box before typing again after every AI reply.
+        // browser focus automatically.
         requestAnimationFrame(() => inputElRef.current?.focus());
       }
     }
-  }, [streaming, messages, threadId, threads, attachment]);
+  }, [streaming, messages, threadId, threads, attachment, say]);
 
   sendRef.current = send;
 
@@ -785,6 +1169,7 @@ function ChatApp() {
     setUploading(true);
     try {
       const result = await api.uploadFile(file);
+      // Attached only after the server has read the file.
       setAttachment({ filename: file.name, kind: result.kind, content: result.content });
     } catch (err) {
       setUploadError(err.message || "Upload failed");
@@ -795,72 +1180,96 @@ function ChatApp() {
 
   const removeAttachment = useCallback(() => setAttachment(null), []);
 
-  const showHero = messages.length === 0 && !streaming;
+  // Prompt starters and tool cards fill the composer; the user sends.
+  const fillComposer = useCallback((text) => {
+    setView("assistant");
+    setInput(text);
+    closeSidebar();
+    focusComposer(true);
+  }, [closeSidebar, focusComposer]);
+
+  const changeView = useCallback((v) => {
+    setView(v);
+    closeSidebar();
+  }, [closeSidebar]);
+
+  const showTools = view === "tools";
+  const showEmpty = !showTools && messages.length === 0 && !streaming;
 
   return (
     <div className="app">
-      {/* Mobile hamburger */}
-      <button className="hamburger" onClick={() => setSidebarOpen(true)}>
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" />
-        </svg>
-      </button>
+      <a className="skip-link" href="#composer-input">Skip to message box</a>
+      <TopBar view={view} health={health} onMenu={() => setSidebarOpen(true)} menuRef={menuBtnRef} />
 
-      <Sidebar
-        threads={threads} titles={titles} threadId={threadId}
-        onNew={newThread}
-        onLoad={tid => { loadThread(tid); setSidebarOpen(false); }}
-        onDelete={removeThread}
-        isOpen={sidebarOpen}
-        onClose={() => setSidebarOpen(false)}
-      />
+      <div className="workspace">
+        <Sidebar
+          threads={threads} titles={titles} threadId={threadId}
+          onNew={newThread}
+          onLoad={tid => { loadThread(tid); closeSidebar(); }}
+          onDelete={removeThread}
+          onRename={renameThread}
+          isOpen={sidebarOpen}
+          onClose={closeSidebar}
+          view={view}
+          onView={changeView}
+          historyStatus={historyStatus}
+          onRetryHistory={() => setHistoryReload(n => n + 1)}
+        />
 
-      <main className={`main${streaming ? " is-streaming" : ""}`}>
-        {showHero
-          ? <Hero onPrompt={send} />
-          : <div className="messages" ref={messagesRef} onScroll={handleMessagesScroll}
-                 onWheel={pauseFollowOnWheel} onTouchMove={pauseFollowOnTouch}>
-              {messages.map((m, i) => <Message key={i} role={m.role} content={m.content} attachmentName={m.attachmentName} />)}
-              {streaming && streamMsg  && <Message role="assistant" content={streamMsg} streaming />}
-              {streaming && !streamMsg && TOOL_STATUS_LABELS[toolStatus] && (
-                <Typing label={TOOL_STATUS_LABELS[toolStatus]} />
-              )}
-              {streaming && !streamMsg && !TOOL_STATUS_LABELS[toolStatus] && <Typing />}
-              {voiceError && (
-                <div className="voice-error-banner">{voiceError}</div>
-              )}
-            </div>
-        }
-        <VoiceStatusBar
-          voiceMode={voiceMode}
-          listening={listening}
-          speaking={speaking}
-          onStop={handleStopVoice}
-          voiceOptions={voiceOptions}
-          selectedVoice={selectedVoice}
-          onVoiceChange={setSelectedVoice}
-        />
-        <InputBar
-          value={input}
-          onChange={setInput}
-          onSend={send}
-          disabled={streaming}
-          voiceSupported={voiceSupported}
-          voiceMode={voiceMode}
-          listening={listening}
-          speaking={speaking}
-          onVoiceToggle={handleVoiceToggle}
-          inputRef={inputElRef}
-          attachment={attachment}
-          uploading={uploading}
-          uploadError={uploadError}
-          onAttachClick={() => fileInputRef.current?.click()}
-          onRemoveAttachment={removeAttachment}
-          fileInputRef={fileInputRef}
-          onFileSelect={handleFileSelect}
-          onStop={stopGeneration}
-        />
-      </main>
+        <main className="main">
+          {showTools
+            ? <ToolDirectory onTry={fillComposer} />
+            : showEmpty
+              ? <EmptyState onPrompt={fillComposer} />
+              : <div className="messages" ref={messagesRef} onScroll={handleMessagesScroll}
+                     onWheel={pauseFollowOnWheel} onTouchMove={pauseFollowOnTouch}>
+                  {messages.map((m, i) => (
+                    <Message key={i} role={m.role} content={m.content} attachmentName={m.attachmentName} restored={m.restored} />
+                  ))}
+                  {streaming && streamMsg && <Message role="assistant" content={streamMsg} streaming />}
+                  {streaming && !streamMsg && <ToolActivity label={TOOL_STATUS_LABELS[toolStatus]} />}
+                  {voiceError && (
+                    <div className="msg"><div className="inline-alert error" role="alert"><AlertIcon size={15} /> {voiceError}</div></div>
+                  )}
+                </div>
+          }
+          {!showTools && (
+            <>
+              <VoiceStatusBar
+                voiceMode={voiceMode}
+                listening={listening}
+                speaking={speaking}
+                onStop={handleStopVoice}
+                voiceOptions={voiceOptions}
+                selectedVoice={selectedVoice}
+                onVoiceChange={setSelectedVoice}
+              />
+              <Composer
+                value={input}
+                onChange={setInput}
+                onSend={send}
+                disabled={streaming}
+                voiceSupported={voiceSupported}
+                voiceMode={voiceMode}
+                listening={listening}
+                speaking={speaking}
+                onVoiceToggle={handleVoiceToggle}
+                inputRef={inputElRef}
+                attachment={attachment}
+                uploading={uploading}
+                uploadError={uploadError}
+                onAttachClick={() => fileInputRef.current?.click()}
+                onRemoveAttachment={removeAttachment}
+                fileInputRef={fileInputRef}
+                onFileSelect={handleFileSelect}
+                onStop={stopGeneration}
+              />
+            </>
+          )}
+        </main>
+      </div>
+
+      <div className="sr-only" aria-live="polite" role="status">{announce}</div>
     </div>
   );
 }
@@ -870,7 +1279,14 @@ function ChatApp() {
 // ═══════════════════════════════════════════════════════
 function ProtectedRoute({ children }) {
   const { isAuthenticated, loading } = useAuth();
-  if (loading) return <div className="auth-loading-screen">Loading…</div>;
+  if (loading) {
+    return (
+      <div className="auth-loading-screen" role="status">
+        <BrandMark size={44} />
+        <span className="loading-text"><span className="spinner small" aria-hidden="true" /> Loading your workspace…</span>
+      </div>
+    );
+  }
   if (!isAuthenticated) return <Navigate to="/login" replace />;
   return children;
 }

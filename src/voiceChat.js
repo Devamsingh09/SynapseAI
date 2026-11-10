@@ -15,8 +15,35 @@ let preferredVoice = null;
 let activeVoiceId = "browser"; // "browser" = Web Speech API; anything else = edge-tts voice id
 let currentAudio = null;
 
+// Server voices (POST /voice/tts → edge-tts) can fail when Microsoft's
+// service rejects the server (e.g. an outdated edge-tts gets HTTP 403).
+// Then we speak with the browser instead of going silent, and skip the
+// server for a while so every sentence doesn't wait for another failure.
+const SERVER_TTS_RETRY_MS = 60_000;
+let serverTtsRetryAt = 0;
+let fallbackNotified = false;
+
 export function setActiveVoice(voiceId) {
   activeVoiceId = voiceId || "browser";
+  serverTtsRetryAt = 0;        // a newly picked voice gets a fresh try
+  fallbackNotified = false;
+}
+
+// Closest browser voice to an edge-tts id like "hi-IN-SwaraNeural": the same
+// voice if the browser has it (Edge lists "Microsoft Swara Online (Natural)"),
+// else any voice for that language, else any voice for the language family.
+function browserVoiceFor(voiceId) {
+  const m = /^([a-z]{2,3}-[A-Z]{2})-(\w+?)Neural$/.exec(voiceId || "");
+  if (!m || !window.speechSynthesis) return null;
+  const [, lang, name] = m;
+  const voices = window.speechSynthesis.getVoices();
+  const langOf = (v) => (v.lang || "").replace("_", "-");
+  return (
+    voices.find((v) => langOf(v) === lang && v.name.includes(name)) ||
+    voices.find((v) => langOf(v) === lang) ||
+    voices.find((v) => langOf(v).startsWith(lang.slice(0, 2))) ||
+    null
+  );
 }
 
 export function getActiveVoice() {
@@ -134,7 +161,7 @@ function stopSpeaking() {
   }
 }
 
-function speakBrowser(text) {
+function speakBrowser(text, voiceOverride = null) {
   return new Promise((resolve, reject) => {
     if (!window.speechSynthesis) {
       reject(new Error("Speech synthesis not supported in this browser."));
@@ -146,11 +173,12 @@ function speakBrowser(text) {
       return;
     }
     loadPreferredVoice();
+    const voice = voiceOverride || preferredVoice;
     const u = new SpeechSynthesisUtterance(clean);
     u.rate = 1.12;
     u.pitch = 1;
-    u.lang = preferredVoice?.lang || "en-US";
-    if (preferredVoice) u.voice = preferredVoice;
+    u.lang = voice?.lang || "en-US";
+    if (voice) u.voice = voice;
     u.onend = () => resolve();
     u.onerror = () => reject(new Error("Speech playback failed"));
     window.speechSynthesis.speak(u);
@@ -244,12 +272,23 @@ export function createVoiceSession({
 
     while (speechQueue.length > 0 && !cancelled) {
       const text = speechQueue.shift();
-      try {
-        if (activeVoiceId !== "browser") {
+      const serverVoice = activeVoiceId !== "browser";
+      if (serverVoice && Date.now() >= serverTtsRetryAt) {
+        try {
           await speakEdge(text);
-        } else {
-          await speakBrowser(text);
+          continue;
+        } catch (e) {
+          if (cancelled) break;
+          console.warn("Server TTS failed — using the browser voice instead:", e);
+          serverTtsRetryAt = Date.now() + SERVER_TTS_RETRY_MS;
+          if (!fallbackNotified) {
+            fallbackNotified = true;
+            onError?.("The selected voice isn't available right now, so the browser voice is being used instead.");
+          }
         }
+      }
+      try {
+        await speakBrowser(text, serverVoice ? browserVoiceFor(activeVoiceId) : null);
       } catch (e) {
         console.warn("TTS:", e);
         onError?.(e.message || "Speech failed");

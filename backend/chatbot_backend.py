@@ -850,12 +850,25 @@ def delete_thread_data(thread_id):
     cursor.execute("DELETE FROM writes WHERE thread_id = ?", (thread_id,))
     conn.commit()
 
-def generate_summary(text):
-    """Title Generator (Separate from Memory Summary)"""
+def generate_title(text):
+    """LLM conversation title, or None if the model call fails / returns
+    nothing — callers decide the fallback (see thread_titles.make_title).
+    Unlike the old bare `except`, failures are logged instead of hidden."""
     try:
         msg = f"Summarize this into a 3-5 word title. No quotes: {text}"
         response = summary_llm.invoke([HumanMessage(content=msg)])
-        title = response.content.strip().replace('"', '').replace("'", "").replace("Title:", "").strip()
-        return title if len(title) < 30 else title[:27] + "..."
-    except:
-        return "New Conversation" 
+        title = (response.content or "").strip()
+        return title or None
+    except Exception as e:
+        print(f"[title] generation failed: {type(e).__name__}: {e}", flush=True)
+        return None
+
+
+def generate_summary(text):
+    """Title Generator (Separate from Memory Summary). Kept for backwards
+    compatibility; new code uses generate_title + thread_titles."""
+    title = generate_title(text)
+    if not title:
+        return "New Conversation"
+    title = title.replace('"', '').replace("'", "").replace("Title:", "").strip()
+    return title if len(title) < 30 else title[:27] + "..." 

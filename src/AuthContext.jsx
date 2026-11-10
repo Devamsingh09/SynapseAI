@@ -3,14 +3,25 @@ import { API_BASE } from "./apiConfig";
 
 const AuthContext = createContext(null);
 
+// Errors carry `status` (0 = the request never reached the server) so pages
+// can choose wording — e.g. login shows a generic message for 401 instead of
+// revealing whether an email exists. `message` is unchanged for other codes.
 async function apiFetch(path, options = {}) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    // Required: the session lives in an httpOnly cookie, not a token we
-    // hold in JS — every request must explicitly opt in to sending it.
-    credentials: "include",
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-    ...options,
-  });
+  let res;
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      // Required: the session lives in an httpOnly cookie, not a token we
+      // hold in JS — every request must explicitly opt in to sending it.
+      credentials: "include",
+      headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+      ...options,
+    });
+  } catch {
+    throw Object.assign(
+      new Error("We couldn't reach the server. Check your connection and try again."),
+      { status: 0 }
+    );
+  }
   let data = null;
   try {
     data = await res.json();
@@ -18,7 +29,10 @@ async function apiFetch(path, options = {}) {
     /* empty body is fine for some endpoints */
   }
   if (!res.ok) {
-    throw new Error((data && data.detail) || `Request failed (${res.status})`);
+    throw Object.assign(
+      new Error((data && data.detail) || `Request failed (${res.status})`),
+      { status: res.status }
+    );
   }
   return data;
 }
