@@ -1,10 +1,10 @@
-﻿name: Android APK
+name: Android APK
 
 # Builds the SynapseAI Android app (android/) and publishes it as the
 # "android-latest" release, so this link always has the newest APK:
 #   https://github.com/Devamsingh09/SynapseAI/releases/download/android-latest/SynapseAI.apk
 #
-# Signing uses two repository secrets (Settings â†’ Secrets and variables â†’ Actions):
+# Signing uses two repository secrets (Settings > Secrets and variables > Actions):
 #   SIGNING_KEYSTORE_BASE64  the release keystore, base64-encoded
 #   SIGNING_PASSWORD         its password
 # Without them the APK is still built (as a downloadable workflow artifact)
@@ -57,7 +57,7 @@ jobs:
             } >> "$GITHUB_ENV"
             echo "signed=true" >> "$GITHUB_OUTPUT"
           else
-            echo "::warning::SIGNING_KEYSTORE_BASE64 / SIGNING_PASSWORD secrets are not set â€” building with a temporary key and not publishing a release."
+            echo "::warning::SIGNING_KEYSTORE_BASE64 / SIGNING_PASSWORD secrets are not set - building with a temporary key and not publishing a release."
             echo "signed=false" >> "$GITHUB_OUTPUT"
           fi
 
