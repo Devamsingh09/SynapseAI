@@ -12,11 +12,16 @@ Design:
 - Email verification / password reset use single-use, expiring random
   tokens stored in `email_tokens` (not the JWT itself), so they can be
   invalidated after one use independently of the session token.
+- The verification email also carries a 6-digit code (`email_otps`, one
+  live code per user, stored as an HMAC, 15 min, 5 tries) so someone on a
+  phone can type it instead of following the link.
 - `thread_owners` maps a LangGraph thread_id to the user who created it,
   so chat threads can be scoped per-user without touching chatbot_backend.py.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 import secrets
 import sqlite3
@@ -64,6 +69,11 @@ FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")
 VERIFY_TOKEN_TTL_HOURS = 24
 RESET_TOKEN_TTL_HOURS = 1
 
+OTP_LENGTH = 6
+OTP_TTL_MINUTES = 15
+OTP_MAX_ATTEMPTS = 5            # wrong tries before the code stops working
+OTP_RESEND_COOLDOWN_SEC = 30    # a new code (and email) at most this often
+
 _lock = threading.Lock()
 _conn = sqlite3.connect(_DB_PATH, check_same_thread=False, timeout=30)
 _conn.execute("PRAGMA journal_mode=WAL")
@@ -89,6 +99,14 @@ def _init_schema() -> None:
                 purpose TEXT NOT NULL CHECK (purpose IN ('verify_email', 'reset_password')),
                 expires_at TEXT NOT NULL,
                 used INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS email_otps (
+                user_id INTEGER PRIMARY KEY REFERENCES users(id),
+                code_hash TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS thread_owners (
@@ -182,6 +200,7 @@ def get_user_by_id(user_id: int) -> Optional[User]:
 def mark_verified(user_id: int) -> None:
     with _lock:
         _conn.execute("UPDATE users SET is_verified = 1 WHERE id = ?", (user_id,))
+        _conn.execute("DELETE FROM email_otps WHERE user_id = ?", (user_id,))
         _conn.commit()
 
 
@@ -239,6 +258,74 @@ def create_verification_token(user_id: int) -> str:
 
 def create_reset_token(user_id: int) -> str:
     return create_email_token(user_id, "reset_password", RESET_TOKEN_TTL_HOURS)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Email verification codes (6 digits, sent alongside the link)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _otp_hash(user_id: int, code: str) -> str:
+    # Keyed hash: a leaked auth.db alone doesn't reveal live codes.
+    return hmac.new(JWT_SECRET.encode(), f"{user_id}:{code}".encode(), hashlib.sha256).hexdigest()
+
+
+def normalize_otp(code: str) -> str:
+    """Accept '123 456', '123-456' etc. as typed or pasted from the email."""
+    return "".join(ch for ch in (code or "") if ch.isdigit())
+
+
+def create_verification_otp(user_id: int, now: Optional[datetime] = None) -> str:
+    """New code for this user; replaces (invalidates) any earlier one."""
+    now = now or datetime.now(timezone.utc)
+    code = f"{secrets.randbelow(10 ** OTP_LENGTH):0{OTP_LENGTH}d}"
+    expires_at = (now + timedelta(minutes=OTP_TTL_MINUTES)).isoformat()
+    with _lock:
+        _conn.execute(
+            "INSERT INTO email_otps (user_id, code_hash, expires_at, attempts, created_at) "
+            "VALUES (?, ?, ?, 0, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET code_hash = excluded.code_hash, "
+            "expires_at = excluded.expires_at, attempts = 0, created_at = excluded.created_at",
+            (user_id, _otp_hash(user_id, code), expires_at, now.isoformat()),
+        )
+        _conn.commit()
+    return code
+
+
+def otp_sent_recently(user_id: int, now: Optional[datetime] = None) -> bool:
+    now = now or datetime.now(timezone.utc)
+    with _lock:
+        row = _conn.execute("SELECT created_at FROM email_otps WHERE user_id = ?", (user_id,)).fetchone()
+    if not row:
+        return False
+    return (now - datetime.fromisoformat(row[0])).total_seconds() < OTP_RESEND_COOLDOWN_SEC
+
+
+def check_verification_otp(user_id: int, code: str, now: Optional[datetime] = None) -> str:
+    """Returns "ok" (code used up), "wrong", "locked" (too many tries),
+    "expired", or "missing" (no live code)."""
+    now = now or datetime.now(timezone.utc)
+    code = normalize_otp(code)
+    with _lock:
+        row = _conn.execute(
+            "SELECT code_hash, expires_at, attempts FROM email_otps WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        if not row:
+            return "missing"
+        code_hash, expires_at, attempts = row
+        if datetime.fromisoformat(expires_at) < now:
+            _conn.execute("DELETE FROM email_otps WHERE user_id = ?", (user_id,))
+            _conn.commit()
+            return "expired"
+        if attempts >= OTP_MAX_ATTEMPTS:
+            return "locked"
+        if len(code) != OTP_LENGTH or not hmac.compare_digest(code_hash, _otp_hash(user_id, code)):
+            _conn.execute("UPDATE email_otps SET attempts = attempts + 1 WHERE user_id = ?", (user_id,))
+            _conn.commit()
+            return "locked" if attempts + 1 >= OTP_MAX_ATTEMPTS else "wrong"
+        _conn.execute("DELETE FROM email_otps WHERE user_id = ?", (user_id,))
+        _conn.commit()
+        return "ok"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

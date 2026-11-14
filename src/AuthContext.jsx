@@ -95,6 +95,16 @@ export function AuthProvider({ children }) {
     []
   );
 
+  // 6-digit code from the verification email: verifies and signs in at once.
+  const verifyOtp = useCallback(async (email, code) => {
+    const data = await apiFetch("/auth/verify-otp", {
+      method: "POST",
+      body: JSON.stringify({ email, code }),
+    });
+    setUser(data);
+    return data;
+  }, []);
+
   const resendVerification = useCallback(
     (email) => apiFetch("/auth/resend-verification", { method: "POST", body: JSON.stringify({ email }) }),
     []
@@ -110,6 +120,7 @@ export function AuthProvider({ children }) {
     forgotPassword,
     resetPassword,
     verifyEmail,
+    verifyOtp,
     resendVerification,
     refreshUser,
   };

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Link, Navigate, useNavigate, useSearchParams } from "react-router-dom";
 import { useAuth } from "./AuthContext";
 import { BrandMark, Wordmark } from "./Brand";
@@ -114,6 +114,127 @@ function PasswordField({ id, label, labelAside, ...inputProps }) {
 }
 
 // ═══════════════════════════════════════════════════════
+// VERIFY WITH A CODE — after signup, or when signing in to an
+// unverified account. The verification email has a 6-digit code (also in
+// its subject, so it shows in the phone's notification) and a link; the
+// code verifies and signs in without leaving the app.
+// ═══════════════════════════════════════════════════════
+const OTP_LENGTH = 6;
+const RESEND_COOLDOWN_SEC = 30;   // matches the server's cooldown
+
+function VerifyCodePanel({ email, emailSent = true, sentJustNow = false, onChangeEmail }) {
+  const { verifyOtp, resendVerification } = useAuth();
+  const navigate = useNavigate();
+  const [code, setCode] = useState("");
+  const [error, setError] = useState(null);
+  const [notice, setNotice] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [resending, setResending] = useState(false);
+  const [cooldown, setCooldown] = useState(sentJustNow ? RESEND_COOLDOWN_SEC : 0);
+
+  useEffect(() => {
+    if (cooldown <= 0) return undefined;
+    const t = setTimeout(() => setCooldown((c) => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [cooldown]);
+
+  const submit = async (value) => {
+    if (submitting) return;
+    if (value.length !== OTP_LENGTH) {
+      setError("Enter the 6-digit code from the email.");
+      return;
+    }
+    setError(null);
+    setNotice(null);
+    setSubmitting(true);
+    try {
+      await verifyOtp(email, value);
+      navigate("/", { replace: true });
+    } catch (err) {
+      setError(!err.status || err.status >= 500
+        ? "We couldn't reach the server. Check your connection and try again."
+        : err.message);
+      setSubmitting(false);
+    }
+  };
+
+  // Digits only; a full code (typed, pasted or autofilled) is sent right away.
+  const onChange = (e) => {
+    const digits = e.target.value.replace(/\D/g, "").slice(0, OTP_LENGTH);
+    setCode(digits);
+    if (error) setError(null);
+    if (digits.length === OTP_LENGTH && code.length !== OTP_LENGTH) submit(digits);
+  };
+
+  const resend = async () => {
+    if (resending || cooldown > 0) return;
+    setResending(true);
+    setError(null);
+    try {
+      await resendVerification(email);
+      setNotice("A new code is on its way. Use the newest email — older codes stop working.");
+      setCode("");
+      setCooldown(RESEND_COOLDOWN_SEC);
+    } catch (err) {
+      setError(!err.status || err.status >= 500
+        ? "We couldn't reach the server. Check your connection and try again."
+        : err.message);
+    } finally {
+      setResending(false);
+    }
+  };
+
+  return (
+    <>
+      {!emailSent && (
+        <FieldNotice>
+          Email sending isn't configured on this server yet — check the backend server log for the code (dev mode).
+        </FieldNotice>
+      )}
+      <form className="auth-form" onSubmit={(e) => { e.preventDefault(); submit(code); }}>
+        <div className="field">
+          <label className="field-label" htmlFor="otp-code">Verification code</label>
+          <input
+            id="otp-code"
+            className="field-input otp-input"
+            value={code}
+            onChange={onChange}
+            inputMode="numeric"
+            pattern="[0-9]*"
+            autoComplete="one-time-code"
+            // no maxLength: a pasted "123 456" would be cut to "123 45" before
+            // onChange strips the space — onChange keeps the first 6 digits instead
+            placeholder="••••••"
+            aria-describedby="otp-hint"
+            autoFocus
+            required
+          />
+        </div>
+        <div className="field-hint" id="otp-hint">
+          The code works for 15 minutes. You can also tap the link in the email.
+        </div>
+        <FieldError>{error}</FieldError>
+        {notice && <FieldNotice>{notice}</FieldNotice>}
+        <SubmitButton busy={submitting} busyLabel="Verifying…">
+          Verify and continue <ArrowRightIcon size={16} />
+        </SubmitButton>
+      </form>
+      <div className="otp-resend" style={{ marginTop: 16 }}>
+        Didn't get it?
+        <button type="button" className="text-btn" onClick={resend} disabled={resending || cooldown > 0}>
+          {resending ? "Sending…" : cooldown > 0 ? `Send a new code in ${cooldown}s` : "Send a new code"}
+        </button>
+      </div>
+      <div className="auth-links">
+        {onChangeEmail
+          ? <button type="button" className="text-btn" onClick={onChangeEmail}>Back to sign in</button>
+          : <Link to="/login">Back to sign in</Link>}
+      </div>
+    </>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
 // LOGIN
 // ═══════════════════════════════════════════════════════
 function loginErrorMessage(err) {
@@ -136,6 +257,7 @@ export function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState(null);
   const [submitting, setSubmitting] = useState(false);
+  const [needsCode, setNeedsCode] = useState(false); // right password, email not verified yet
 
   if (!loading && isAuthenticated) return <Navigate to="/" replace />;
 
@@ -148,11 +270,23 @@ export function LoginPage() {
       await login(email, password);
       navigate("/");
     } catch (err) {
-      setError(loginErrorMessage(err));
+      if (err.status === 403) setNeedsCode(true);   // 403 only after a correct password
+      else setError(loginErrorMessage(err));
     } finally {
       setSubmitting(false);
     }
   };
+
+  if (needsCode) {
+    return (
+      <AuthShell
+        title="Verify your email"
+        subtitle={`Enter the 6-digit code we emailed to ${email.trim()}. If it has expired, send a new one.`}
+      >
+        <VerifyCodePanel email={email.trim()} onChangeEmail={() => setNeedsCode(false)} />
+      </AuthShell>
+    );
+  }
 
   return (
     <AuthShell title="Welcome back" subtitle="Sign in to continue to your workspace.">
@@ -224,15 +358,8 @@ export function SignupPage() {
 
   if (done) {
     return (
-      <AuthShell title="Check your email" subtitle={`We sent a verification link to ${email}.`}>
-        <FieldNotice>
-          {done.email_sent
-            ? "Click the link in that email to activate your account, then come back and sign in."
-            : "Email sending isn't configured on this server yet — check the backend server log for the verification link (dev mode)."}
-        </FieldNotice>
-        <div className="auth-links">
-          <Link to="/login">Back to sign in</Link>
-        </div>
+      <AuthShell title="Check your email" subtitle={`We sent a 6-digit code to ${email.trim()}. Enter it below to finish signing up.`}>
+        <VerifyCodePanel email={email.trim()} emailSent={done.email_sent} sentJustNow />
       </AuthShell>
     );
   }

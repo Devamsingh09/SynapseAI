@@ -54,14 +54,34 @@ def _send(to_email: str, subject: str, html: str, reply_to: str = None) -> bool:
         return False
 
 
-def send_verification_email(to_email: str, token: str) -> bool:
+def build_verification_email(token: str, code: str = None) -> tuple:
+    """(subject, html). With a code, it leads (and is in the subject, so it
+    shows in the phone's notification); the link stays as the other option."""
     link = f"{FRONTEND_ORIGIN}/verify-email?token={token}"
+    if not code:
+        html = (
+            f"<p>Welcome to Synapse AI — confirm your email to activate your account.</p>"
+            f'<p><a href="{link}">Verify your email</a></p>'
+            f"<p>This link expires in 24 hours. If you didn't sign up, you can ignore this email.</p>"
+        )
+        return "Verify your Synapse AI account", html
     html = (
-        f"<p>Welcome to Synapse AI — confirm your email to activate your account.</p>"
-        f'<p><a href="{link}">Verify your email</a></p>'
-        f"<p>This link expires in 24 hours. If you didn't sign up, you can ignore this email.</p>"
+        '<div style="font-family:Segoe UI,Helvetica,Arial,sans-serif;max-width:480px;color:#1f2937">'
+        "<p>Welcome to Synapse AI! Enter this code to verify your email and sign in:</p>"
+        '<p style="font-size:32px;font-weight:700;letter-spacing:8px;margin:20px 0;'
+        'font-family:Consolas,Menlo,monospace;color:#4f46e5">'
+        f"{code}</p>"
+        "<p style=\"color:#6b7280\">The code works for 15 minutes.</p>"
+        f'<p>Or <a href="{link}">verify with this link</a> (works for 24 hours).</p>'
+        "<p style=\"color:#6b7280\">If you didn't sign up, you can ignore this email.</p>"
+        "</div>"
     )
-    return _send(to_email, "Verify your Synapse AI account", html)
+    return f"{code} is your Synapse AI verification code", html
+
+
+def send_verification_email(to_email: str, token: str, code: str = None) -> bool:
+    subject, html = build_verification_email(token, code)
+    return _send(to_email, subject, html)
 
 
 def send_password_reset_email(to_email: str, token: str) -> bool:

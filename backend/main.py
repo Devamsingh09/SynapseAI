@@ -155,6 +155,11 @@ class ResendVerificationRequest(BaseModel):
     email: str
 
 
+class VerifyOtpRequest(BaseModel):
+    email: str
+    code: str
+
+
 class FeedbackRequest(BaseModel):
     name: str
     message: str
@@ -265,20 +270,33 @@ def _user_payload(user) -> dict:
 
 @app.post("/auth/signup", status_code=201)
 async def signup(req: SignupRequest):
-    """Create an account and email a verification link. Login is blocked
-    until the email is verified (full verify+reset flow, not basic auth)."""
+    """Create an account and email a verification code + link. Login is
+    blocked until the email is verified (full verify+reset flow, not basic auth)."""
     try:
         async with io_slot():
             user = await run_in_pool(auth.create_user, req.email, req.password, timeout=IO_TIMEOUT_SEC)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
-    token = auth.create_verification_token(user.id)
-    email_sent = email_service.send_verification_email(user.email, token)
+    email_sent = _send_verification(user.id, user.email)
     return {
-        "message": "Account created. Check your email to verify your account before logging in.",
+        "message": "Account created. Check your email for a code to verify your account.",
         "email_sent": email_sent,
     }
+
+
+def _send_verification(user_id: int, email: str) -> bool:
+    token = auth.create_verification_token(user_id)
+    code = auth.create_verification_otp(user_id)
+    return email_service.send_verification_email(email, token, code)
+
+
+_OTP_ERRORS = {
+    "wrong": "That code isn't right. Check the latest email from Synapse AI and try again.",
+    "expired": "That code has expired. Send a new code and try again.",
+    "missing": "That code has expired. Send a new code and try again.",
+    "locked": "Too many wrong tries. Send a new code and try again.",
+}
 
 
 @app.get("/auth/verify-email")
@@ -296,10 +314,29 @@ async def resend_verification(req: ResendVerificationRequest):
     """Always returns success regardless of whether the email exists/is
     already verified — avoids leaking which emails have accounts."""
     user = auth.get_user_by_email(req.email)
-    if user and not user["is_verified"]:
-        token = auth.create_verification_token(user["id"])
-        email_service.send_verification_email(user["email"], token)
-    return {"message": "If that email has a pending account, a new verification link has been sent."}
+    # The cooldown stops repeated clicks from flooding the inbox (and from
+    # resetting the wrong-try counter over and over).
+    if user and not user["is_verified"] and not auth.otp_sent_recently(user["id"]):
+        _send_verification(user["id"], user["email"])
+    return {"message": "If that email has a pending account, a new code has been sent."}
+
+
+@app.post("/auth/verify-otp")
+async def verify_otp(req: VerifyOtpRequest, response: Response):
+    """Verify the email with the 6-digit code from the verification email,
+    then sign in right away (the code proves the inbox, like the link)."""
+    user = auth.get_user_by_email(req.email)
+    if not user:
+        raise HTTPException(status_code=400, detail=_OTP_ERRORS["wrong"])
+    if user["is_verified"]:
+        raise HTTPException(status_code=409, detail="This email is already verified. Sign in with your password.")
+    result = auth.check_verification_otp(user["id"], req.code)
+    if result != "ok":
+        raise HTTPException(status_code=400, detail=_OTP_ERRORS[result])
+    auth.mark_verified(user["id"])
+    token = auth.create_access_token(user["id"], user["email"])
+    auth.set_session_cookie(response, token)
+    return {"id": user["id"], "email": user["email"], "is_verified": True}
 
 
 @app.post("/auth/login")
