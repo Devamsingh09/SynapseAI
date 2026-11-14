@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Same tokens as src/index.css -->
+<resources>
+    <color name="syn_bg">#080D19</color>
+    <color name="syn_header">#0B1221</color>
+    <color name="syn_text">#E8EDF7</color>
+    <color name="syn_muted">#8B9AB3</color>
+    <color name="syn_primary">#6366F1</color>
+    <color name="syn_primary_pressed">#4F52D9</color>
+    <color name="syn_blue">#278BDB</color>
+</resources>

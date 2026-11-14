@@ -1,0 +1,96 @@
+name: Android APK
+
+# Builds the SynapseAI Android app (android/) and publishes it as the
+# "android-latest" release, so this link always has the newest APK:
+#   https://github.com/Devamsingh09/SynapseAI/releases/download/android-latest/SynapseAI.apk
+#
+# Signing uses two repository secrets (Settings → Secrets and variables → Actions):
+#   SIGNING_KEYSTORE_BASE64  the release keystore, base64-encoded
+#   SIGNING_PASSWORD         its password
+# Without them the APK is still built (as a downloadable workflow artifact)
+# but not published, because a throwaway key would block future updates.
+
+on:
+  push:
+    branches: [main]
+    paths: ["android/**", ".github/workflows/android.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-apk
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      - name: Prepare signing key
+        id: signing
+        env:
+          KEYSTORE_B64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ] && [ -n "$SIGNING_PASSWORD" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > release.jks
+            {
+              echo "SIGNING_STORE_FILE=release.jks"
+              echo "SIGNING_STORE_PASSWORD=$SIGNING_PASSWORD"
+              echo "SIGNING_KEY_ALIAS=synapseai"
+              echo "SIGNING_KEY_PASSWORD=$SIGNING_PASSWORD"
+            } >> "$GITHUB_ENV"
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::SIGNING_KEYSTORE_BASE64 / SIGNING_PASSWORD secrets are not set — building with a temporary key and not publishing a release."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build APK
+        run: |
+          set -o pipefail
+          gradle assembleRelease -PversionCode=${{ github.run_number }} --no-daemon --stacktrace 2>&1 | tee build.log
+      - name: Show build errors
+        if: failure()
+        run: |
+          # Surface compiler/AAPT errors as annotations (readable without opening the log).
+          grep -E "error:|ERROR:|What went wrong|e: |FAILED" -A 3 build.log | head -n 60 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+
+      - name: Collect APK
+        run: |
+          mkdir -p ../dist
+          cp app/build/outputs/apk/release/app-release.apk ../dist/SynapseAI.apk
+          ls -l ../dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SynapseAI-apk
+          path: dist/SynapseAI.apk
+
+      - name: Publish release
+        if: steps.signing.outputs.signed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete android-latest --yes --cleanup-tag || true
+          gh release create android-latest ../dist/SynapseAI.apk \
+            --target "$GITHUB_SHA" \
+            --title "SynapseAI for Android (build ${{ github.run_number }})" \
+            --notes "Install: open this page on your Android phone, tap **SynapseAI.apk**, then allow installing from your browser if asked. New builds install over the old one and keep you signed in."

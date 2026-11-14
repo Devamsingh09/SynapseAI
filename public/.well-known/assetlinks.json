@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.synapseai.android",
+      "sha256_cert_fingerprints": [
+        "69:AC:2F:61:8C:40:5E:67:FA:62:F7:89:C8:1A:D6:A3:2C:B9:49:69:1D:A6:10:17:81:AA:50:15:99:3F:6C:F3"
+      ]
+    }
+  }
+]

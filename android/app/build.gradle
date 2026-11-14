@@ -1,0 +1,67 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Release signing. Either a keystore.properties file next to settings.gradle
+// (storeFile, storePassword, keyAlias, keyPassword) or the SIGNING_* env vars
+// used by CI. Without either, release builds fall back to the debug key so
+// `assembleRelease` still produces an installable APK.
+def signing = new Properties()
+def signingFile = rootProject.file('keystore.properties')
+if (signingFile.exists()) signingFile.withInputStream { signing.load(it) }
+['storeFile', 'storePassword', 'keyAlias', 'keyPassword'].each { key ->
+    def env = System.getenv('SIGNING_' + key.replaceAll(/([A-Z])/, '_$1').toUpperCase())
+    if (env) signing[key] = env
+}
+def hasReleaseKey = signing['storeFile'] && rootProject.file(signing['storeFile']).exists()
+
+android {
+    namespace 'com.synapseai.android'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.synapseai.android'
+        minSdk 24
+        targetSdk 35
+        // CI passes -PversionCode=<run number> so each build installs over the last.
+        versionCode((project.findProperty('versionCode') ?: '1') as int)
+        versionName '1.0.' + versionCode
+        buildConfigField 'String', 'APP_URL', '"https://synapse-ai-orcin.vercel.app"'
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    signingConfigs {
+        release {
+            if (hasReleaseKey) {
+                storeFile rootProject.file(signing['storeFile'])
+                storePassword signing['storePassword']
+                keyAlias signing['keyAlias']
+                keyPassword signing['keyPassword']
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig hasReleaseKey ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'androidx.activity:activity:1.9.3'
+    implementation 'androidx.core:core:1.13.1'
+    implementation 'androidx.core:core-splashscreen:1.0.1'
+    implementation 'androidx.webkit:webkit:1.12.1'
+}

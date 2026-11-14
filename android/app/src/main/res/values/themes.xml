@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Synapse" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/syn_bg</item>
+        <item name="android:colorAccent">@color/syn_primary</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+
+    <!-- Splash while the site loads (Android 12+ system splash, backported below). -->
+    <style name="Theme.Synapse.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/syn_bg</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <item name="postSplashScreenTheme">@style/Theme.Synapse</item>
+    </style>
+</resources>
