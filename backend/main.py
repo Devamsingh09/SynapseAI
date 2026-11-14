@@ -15,6 +15,7 @@ import threading
 import auth
 import email_service
 import feedback
+import keepalive
 import thread_titles
 from chatbot_backend import (
     chatbot,
@@ -49,7 +50,10 @@ async def lifespan(app: FastAPI):
         print("WARNING: GROQ_API_KEY is missing — set it in synapse-ai-backend/.env")
     elif not GROQ_API_KEY.startswith("gsk_"):
         print("WARNING: GROQ_API_KEY format looks wrong — copy a fresh key from console.groq.com")
+    keepalive_task = keepalive.start()
     yield
+    if keepalive_task:
+        keepalive_task.cancel()
     shutdown_pool()
 
 
