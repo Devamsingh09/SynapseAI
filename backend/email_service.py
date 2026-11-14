@@ -12,11 +12,16 @@ import os
 
 from dotenv import load_dotenv
 
+import feedback
+
 _BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(_BACKEND_DIR, ".env"), override=False)
 
 RESEND_API_KEY = (os.getenv("RESEND_API_KEY") or "").strip()
 RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "Synapse AI <onboarding@resend.dev>")
+# Where the in-app feedback form is delivered. With Resend's shared
+# onboarding@resend.dev sender this must be the Resend account's own email.
+FEEDBACK_TO_EMAIL = (os.getenv("FEEDBACK_TO_EMAIL") or "devamsingh0009@gmail.com").strip()
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")
 
 _resend_configured = bool(RESEND_API_KEY)
@@ -26,7 +31,7 @@ if _resend_configured:
     resend.api_key = RESEND_API_KEY
 
 
-def _send(to_email: str, subject: str, html: str) -> bool:
+def _send(to_email: str, subject: str, html: str, reply_to: str = None) -> bool:
     if not _resend_configured:
         # flush=True — see the note on adaptive_loop's logging: this may run
         # off the main thread via FastAPI's sync-route threadpool.
@@ -39,7 +44,10 @@ def _send(to_email: str, subject: str, html: str) -> bool:
     try:
         import resend
 
-        resend.Emails.send({"from": RESEND_FROM_EMAIL, "to": [to_email], "subject": subject, "html": html})
+        params = {"from": RESEND_FROM_EMAIL, "to": [to_email], "subject": subject, "html": html}
+        if reply_to:
+            params["reply_to"] = reply_to
+        resend.Emails.send(params)
         return True
     except Exception as exc:
         print(f"[email_service] send failed to {to_email}: {type(exc).__name__}: {exc}", flush=True)
@@ -64,3 +72,9 @@ def send_password_reset_email(to_email: str, token: str) -> bool:
         f"<p>This link expires in 1 hour. If you didn't request this, you can ignore this email.</p>"
     )
     return _send(to_email, "Reset your Synapse AI password", html)
+
+
+def send_feedback_email(name: str, user_email: str, message: str, user_id=None) -> bool:
+    """Deliver in-app feedback to the creator; replies go straight to the user."""
+    subject, html = feedback.build_email(name, user_email, message, user_id=user_id)
+    return _send(FEEDBACK_TO_EMAIL, subject, html, reply_to=user_email)

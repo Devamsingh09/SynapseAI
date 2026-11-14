@@ -7,7 +7,7 @@
  * hardcoded host — this is what makes the Vercel rewrites/proxy setup work
  * (see vercel.json): the browser only ever calls its own origin, and
  * Vercel's edge forwards /auth, /thread, /threads, /chat, /voice, /upload,
- * /health to the real backend host transparently, keeping the session
+ * /health, /feedback to the real backend host transparently, keeping the session
  * cookie same-site. Only set REACT_APP_API_URL in production if you
  * deliberately want the browser to call a different origin directly
  * (e.g. a subdomain setup) instead of going through rewrites.

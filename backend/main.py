@@ -14,6 +14,7 @@ import threading
 
 import auth
 import email_service
+import feedback
 import thread_titles
 from chatbot_backend import (
     chatbot,
@@ -148,6 +149,21 @@ class ResetPasswordRequest(BaseModel):
 
 class ResendVerificationRequest(BaseModel):
     email: str
+
+
+class FeedbackRequest(BaseModel):
+    name: str
+    message: str
+
+    @field_validator("name")
+    @classmethod
+    def _valid_name(cls, v: str) -> str:
+        return feedback.normalize_name(v)
+
+    @field_validator("message")
+    @classmethod
+    def _valid_message(cls, v: str) -> str:
+        return feedback.normalize_message(v)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -323,6 +339,44 @@ async def reset_password(req: ResetPasswordRequest):
         raise HTTPException(status_code=400, detail="This reset link is invalid or has expired.")
     auth.update_password(user_id, req.new_password)
     return {"message": "Password updated — you can now log in."}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FEEDBACK (requires login)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_feedback_limiter = feedback.RateLimiter()
+
+
+@app.post("/feedback")
+async def send_feedback(req: FeedbackRequest, current_user: auth.User = Depends(auth.get_current_user)):
+    """Email the user's feedback to the creator. The sender's address comes
+    from the session (not the form), and replies go straight to them."""
+    if not _feedback_limiter.allow(current_user.id):
+        raise HTTPException(
+            status_code=429,
+            detail="You've sent several messages in the last hour. Please try again a bit later.",
+        )
+    try:
+        async with io_slot():
+            sent = await run_in_pool(
+                email_service.send_feedback_email,
+                req.name,
+                current_user.email,
+                req.message,
+                current_user.id,
+                timeout=IO_TIMEOUT_SEC,
+            )
+    except Exception as exc:
+        print(f"[feedback] send error: {type(exc).__name__}: {exc}", flush=True)
+        sent = False
+    if not sent:
+        _feedback_limiter.refund(current_user.id)
+        raise HTTPException(
+            status_code=503,
+            detail="We couldn't send your feedback right now. Please try again in a few minutes.",
+        )
+    return {"ok": True, "message": "Thanks! Your feedback was sent."}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

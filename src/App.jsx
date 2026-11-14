@@ -18,11 +18,12 @@ import { AuthProvider, useAuth } from "./AuthContext";
 import { LoginPage, SignupPage, VerifyEmailPage, ForgotPasswordPage, ResetPasswordPage } from "./AuthPages";
 import { BrandMark, Wordmark } from "./Brand";
 import ToolDirectory, { TOOLS } from "./ToolDirectory";
+import FeedbackPage from "./FeedbackPage";
 import {
   PlusIcon, MenuIcon, CloseIcon, ChatIcon, ToolsIcon, TrashIcon, PencilIcon, PaperclipIcon,
   MicIcon, SendIcon, StopIcon, LogoutIcon, ChevronUpIcon, ChevronDownIcon, FileIcon, ImageIcon,
   AlertIcon, CopyIcon, CheckIcon, SearchIcon, CodeIcon, BookIcon, SparkIcon, SidebarIcon,
-  VolumeIcon, RefreshIcon, ArrowDownIcon, ArrowRightIcon,
+  VolumeIcon, RefreshIcon, ArrowDownIcon, ArrowRightIcon, FeedbackIcon,
 } from "./Icons";
 
 // ═══════════════════════════════════════════════════════
@@ -140,6 +141,8 @@ const api = {
 
 // /health is a real backend endpoint: { ok } is true when the model provider
 // is configured. The status pill only ever reflects what it returns.
+const VIEW_LABELS = { assistant: "AI Assistant", tools: "AI Tools", feedback: "Feedback" };
+
 const HEALTH_LABELS = {
   checking: "Connecting…",
   ok: "Connected",
@@ -188,7 +191,7 @@ function TopBar({ view, health, isMobile, collapsed, onToggleNav, onNew, navBtnR
         <Wordmark />
       </div>
       <span className="crumb-sep" aria-hidden="true">/</span>
-      <span className="crumb">{view === "tools" ? "AI Tools" : "AI Assistant"}</span>
+      <span className="crumb">{VIEW_LABELS[view] || VIEW_LABELS.assistant}</span>
 
       <div className="topbar-right">
         <span className="model-pill" title="Language model that writes the answers">GPT-OSS 120B</span>
@@ -209,7 +212,7 @@ function TopBar({ view, health, isMobile, collapsed, onToggleNav, onNew, navBtnR
 // ═══════════════════════════════════════════════════════
 // Log out sits one click behind the account row so a stray click can't end
 // the session. Closes on outside click or Escape; focus returns to the row.
-function AccountMenu({ email, onLogout }) {
+function AccountMenu({ email, onLogout, onFeedback }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const rootRef = useRef(null);
@@ -245,7 +248,11 @@ function AccountMenu({ email, onLogout }) {
           <div className="account-menu-label">Signed in as</div>
           <div className="account-menu-email" title={email}>{email}</div>
           <div className="account-menu-sep" />
-          <button className="account-menu-item danger" role="menuitem" onClick={handleLogout} disabled={busy} autoFocus>
+          <button className="account-menu-item" role="menuitem" onClick={() => { setOpen(false); onFeedback(); }} autoFocus>
+            <FeedbackIcon size={15} />
+            Send feedback
+          </button>
+          <button className="account-menu-item danger" role="menuitem" onClick={handleLogout} disabled={busy}>
             <LogoutIcon size={15} />
             {busy ? "Signing out…" : "Sign out"}
           </button>
@@ -422,6 +429,16 @@ function Sidebar({
         >
           <ToolsIcon size={18} />
         </button>
+        <button
+          type="button"
+          className={`rail-btn ${view === "feedback" ? "active" : ""}`}
+          onClick={() => onView("feedback")}
+          aria-label="Feedback"
+          aria-current={view === "feedback" ? "page" : undefined}
+          title="Feedback"
+        >
+          <FeedbackIcon size={18} />
+        </button>
         {user && (
           <button type="button" className="rail-avatar" onClick={onExpand} aria-label={`Account: ${user.email}. Expand sidebar`} title={user.email}>
             {(user.email || "?")[0].toUpperCase()}
@@ -485,6 +502,14 @@ function Sidebar({
             <ToolsIcon size={16} /> AI Tools
             <span className="nav-badge" aria-label={`${TOOLS.length} tools`}>{TOOLS.length}</span>
           </button>
+          <button
+            type="button"
+            className={`nav-item ${view === "feedback" ? "active" : ""}`}
+            aria-current={view === "feedback" ? "page" : undefined}
+            onClick={() => onView("feedback")}
+          >
+            <FeedbackIcon size={16} /> Feedback
+          </button>
         </nav>
 
         <nav className="history" aria-label="Recent conversations">
@@ -519,7 +544,7 @@ function Sidebar({
           )}
         </nav>
 
-        {user && <AccountMenu email={user.email} onLogout={logout} />}
+        {user && <AccountMenu email={user.email} onLogout={logout} onFeedback={() => onView("feedback")} />}
       </aside>
     </>
   );
@@ -1038,7 +1063,7 @@ function ChatApp() {
   const [input,       setInput]       = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [collapsed,   setCollapsed]   = useState(() => readPref("synapse_sidebar", "open") === "collapsed");
-  const [view,        setView]        = useState("assistant"); // "assistant" | "tools"
+  const [view,        setView]        = useState("assistant"); // "assistant" | "tools" | "feedback"
   const [historyStatus, setHistoryStatus] = useState("loading"); // loading | ready | error
   const [historyReload, setHistoryReload] = useState(0);
   const [health,      setHealth]      = useState("checking");
@@ -1588,7 +1613,9 @@ function ChatApp() {
   }, [removeThread, threadId]);
 
   const showTools = view === "tools";
-  const showEmpty = !showTools && messages.length === 0 && !streaming;
+  const showFeedback = view === "feedback";
+  const inChat = view === "assistant";
+  const showEmpty = inChat && messages.length === 0 && !streaming;
   const rail = collapsed && !isMobile;
 
   const recentCards = useMemo(() => (
@@ -1673,6 +1700,7 @@ function ChatApp() {
 
         <main className={`main ${showEmpty ? "is-empty" : ""}`}>
           {showTools && <ToolDirectory onTry={fillComposer} />}
+          {showFeedback && <FeedbackPage onBack={() => changeView("assistant")} />}
 
           {showEmpty && (
             <EmptyState
@@ -1688,7 +1716,7 @@ function ChatApp() {
             />
           )}
 
-          {!showTools && !showEmpty && (
+          {inChat && !showEmpty && (
             <>
               <ConversationHeader
                 title={titles[threadId] && titles[threadId] !== "New Conversation" ? titles[threadId] : "New conversation"}

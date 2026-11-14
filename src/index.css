@@ -1108,3 +1108,117 @@ a { color: var(--syn-cyan); }
   }
   .spinner { animation: spin 1.6s linear infinite !important; } /* keep a slow, essential progress cue */
 }
+
+/* ══════════════════════════════════════════════════════
+   FEEDBACK PAGE — creator card + short feedback form
+══════════════════════════════════════════════════════ */
+.feedback-inner { max-width: 900px; }
+.feedback-grid {
+  margin-top: 28px;
+  display: grid; grid-template-columns: minmax(0, 300px) minmax(0, 1fr); gap: 20px;
+  align-items: start;
+}
+
+.creator-card {
+  position: relative; overflow: hidden;
+  display: flex; flex-direction: column; align-items: center; text-align: center;
+  padding: 30px 22px 22px;
+  background: var(--syn-surface);
+  border: 1px solid var(--syn-border-soft);
+  border-radius: var(--radius-card);
+}
+.creator-card::before {               /* soft brand glow behind the photo */
+  content: ""; position: absolute; inset: 0 0 auto 0; height: 120px;
+  background: radial-gradient(60% 100% at 50% 0%, rgba(99, 102, 241, 0.32), transparent 70%);
+  pointer-events: none;
+}
+.creator-photo {
+  position: relative;
+  width: 112px; height: 112px; padding: 3px; border-radius: 50%;
+  background: var(--syn-gradient);
+  box-shadow: 0 10px 30px rgba(39, 139, 219, 0.25);
+}
+.creator-photo img, .creator-initials {
+  width: 100%; height: 100%; border-radius: 50%;
+  border: 3px solid var(--syn-surface);
+  object-fit: cover; display: block;
+}
+.creator-initials {
+  display: flex; align-items: center; justify-content: center;
+  background: var(--syn-header); font-size: 34px; font-weight: 600; color: var(--syn-text);
+}
+.creator-name { position: relative; margin-top: 16px; font-size: 20px; font-weight: 600; letter-spacing: -0.2px; }
+.creator-role {
+  margin-top: 6px; padding: 3px 10px; border-radius: var(--radius-pill);
+  background: var(--syn-primary-tint); border: 1px solid var(--syn-primary-line);
+  font-size: 12px; font-weight: 500; color: #C7D2FE;
+}
+.creator-note { margin-top: 14px; font-size: 13px; line-height: 1.55; color: var(--syn-muted); }
+.creator-links { margin-top: 18px; width: 100%; display: flex; flex-direction: column; gap: 8px; }
+.creator-link {
+  display: flex; align-items: center; gap: 9px; min-width: 0;
+  padding: 9px 12px; border-radius: 10px;
+  background: rgba(8, 13, 25, 0.55); border: 1px solid var(--syn-border-soft);
+  color: var(--syn-text); font-size: 13px; text-decoration: none;
+  transition: border-color var(--t-hover), background var(--t-hover);
+}
+.creator-link svg { flex-shrink: 0; color: var(--syn-cyan); }
+.creator-link span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.creator-link:hover { border-color: var(--syn-primary-line); background: var(--syn-surface-hover); }
+
+.feedback-card {
+  padding: 24px;
+  background: var(--syn-surface);
+  border: 1px solid var(--syn-border-soft);
+  border-radius: var(--radius-card);
+}
+.feedback-form { display: flex; flex-direction: column; gap: 16px; }
+.feedback-card-title { font-size: 17px; font-weight: 600; }
+.sending-as {
+  display: flex; align-items: center; gap: 8px; margin-top: -4px;
+  font-size: 12.5px; color: var(--syn-muted); min-width: 0;
+}
+.sending-as svg { flex-shrink: 0; color: var(--syn-cyan); }
+.sending-as span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sending-as strong { color: var(--syn-text); font-weight: 500; }
+.feedback-text { resize: vertical; min-height: 104px; max-height: 260px; line-height: 1.5; font-family: inherit; }
+.fb-count { font-size: 11.5px; color: var(--syn-muted); font-variant-numeric: tabular-nums; }
+.fb-count.near { color: var(--syn-warning); }
+.feedback-foot { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
+.fb-hint { font-size: 12px; color: var(--syn-muted); line-height: 1.5; }
+.fb-hint .kbd { margin-left: 2px; }
+
+.feedback-sent {
+  display: flex; flex-direction: column; align-items: center; text-align: center;
+  padding: 26px 8px 10px; animation: rise 220ms ease-out both;
+}
+.sent-badge {
+  width: 56px; height: 56px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(74, 222, 128, 0.12); border: 1px solid rgba(74, 222, 128, 0.4);
+  color: var(--syn-success);
+}
+.sent-title { margin-top: 16px; font-size: 21px; font-weight: 600; outline: none; }
+.sent-text { margin-top: 8px; max-width: 420px; font-size: 14px; line-height: 1.55; color: var(--syn-muted); overflow-wrap: anywhere; }
+.sent-text strong { color: var(--syn-text); font-weight: 500; }
+.sent-actions { margin-top: 22px; display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+.sent-actions .btn-ghost { padding: 10px 14px; font-size: 14px; border-radius: var(--radius-input); }
+
+@media (max-width: 767px) {
+  .feedback-grid { grid-template-columns: 1fr; margin-top: 20px; gap: 14px; }
+  /* compact card: photo beside the name, so the form shows sooner */
+  .creator-card {
+    display: grid; grid-template-columns: 72px minmax(0, 1fr); column-gap: 14px;
+    grid-template-areas: "photo name" "photo role" "note note" "links links";
+    align-items: center; justify-items: start; text-align: left;
+    padding: 18px;
+  }
+  .creator-photo { grid-area: photo; width: 72px; height: 72px; }
+  .creator-name { grid-area: name; margin-top: 0; align-self: end; font-size: 18px; }
+  .creator-role { grid-area: role; align-self: start; }
+  .creator-note { grid-area: note; margin-top: 14px; }
+  .creator-links { grid-area: links; margin-top: 14px; }
+  .feedback-card { padding: 18px; }
+  .feedback-foot .btn-primary { width: 100%; }
+  .fb-keys { display: none; }
+}
