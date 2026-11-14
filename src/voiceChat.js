@@ -185,6 +185,71 @@ function speakBrowser(text, voiceOverride = null) {
   });
 }
 
+// ── "Read aloud" for a single answer (message action) ──────────────────────
+// Speaks with the voice picked in voice settings (server voice, falling back
+// to the browser like voice mode does). Text is split into ≤450-char chunks:
+// the server caps one TTS request at 500 chars, and some browsers cut long
+// utterances short.
+let readAloudToken = 0;
+
+function splitForSpeech(text, max = 450) {
+  const clean = stripMarkdownForSpeech(text);
+  const sentences = clean.match(/[^.!?]+[.!?]+(\s|$)|[^.!?]+$/g) || [clean];
+  const chunks = [];
+  let cur = "";
+  for (const s of sentences) {
+    if ((cur + s).length > max && cur) { chunks.push(cur.trim()); cur = ""; }
+    if (s.length > max) {
+      for (let i = 0; i < s.length; i += max) chunks.push(s.slice(i, i + max).trim());
+    } else {
+      cur += s;
+    }
+  }
+  if (cur.trim()) chunks.push(cur.trim());
+  return chunks.filter(Boolean);
+}
+
+export function stopReadAloud() {
+  readAloudToken += 1;
+  if (currentAudio) {
+    const a = currentAudio;
+    a.pause();
+    a.onended?.();           // resolves the pending speakEdge promise
+  }
+  window.speechSynthesis?.cancel();
+}
+
+export async function readAloud(text, { onDone, onNotice } = {}) {
+  stopReadAloud();
+  const token = ++readAloudToken;
+  try {
+    for (const chunk of splitForSpeech(text)) {
+      if (token !== readAloudToken) return;
+      const serverVoice = activeVoiceId !== "browser";
+      if (serverVoice && Date.now() >= serverTtsRetryAt) {
+        try {
+          await speakEdge(chunk);
+          continue;
+        } catch (e) {
+          if (token !== readAloudToken) return;
+          serverTtsRetryAt = Date.now() + SERVER_TTS_RETRY_MS;
+          if (!fallbackNotified) {
+            fallbackNotified = true;
+            onNotice?.("The selected voice isn't available right now, so the browser voice is being used instead.");
+          }
+        }
+      }
+      try {
+        await speakBrowser(chunk, serverVoice ? browserVoiceFor(activeVoiceId) : null);
+      } catch {
+        if (token !== readAloudToken) return;
+      }
+    }
+  } finally {
+    if (token === readAloudToken) onDone?.();
+  }
+}
+
 export function createVoiceSession({
   onTranscript,
   onListeningChange,
