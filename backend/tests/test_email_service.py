@@ -45,7 +45,7 @@ def test_sends_through_gmail_script(script):
     assert call["follow_redirects"] is True
     assert call["json"] == {
         "secret": "s3cret", "to": "new.user@gmail.com", "subject": "Code",
-        "html": "<p>123456</p>", "name": "Synapse AI", "replyTo": "r@x.com",
+        "html": "<p>123456</p>", "name": "Devam Singh", "replyTo": "r@x.com",
     }
 
 

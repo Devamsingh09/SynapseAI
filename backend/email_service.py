@@ -33,7 +33,9 @@ FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")
 
 GMAIL_SCRIPT_URL = (os.getenv("GMAIL_SCRIPT_URL") or "").strip()
 GMAIL_SCRIPT_SECRET = (os.getenv("GMAIL_SCRIPT_SECRET") or "").strip()
-SENDER_NAME = os.getenv("EMAIL_SENDER_NAME", "Synapse AI")
+# The owner's own name: the Gmail address is personal (also used for job
+# applications), so mail from it shouldn't appear under the product name.
+SENDER_NAME = os.getenv("EMAIL_SENDER_NAME", "Devam Singh")
 SCRIPT_TIMEOUT_SEC = 25
 
 _script_configured = bool(GMAIL_SCRIPT_URL and GMAIL_SCRIPT_SECRET)
