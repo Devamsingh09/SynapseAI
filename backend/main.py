@@ -278,7 +278,7 @@ async def signup(req: SignupRequest):
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
-    email_sent = _send_verification(user.id, user.email)
+    email_sent = await _in_pool_or_false(_send_verification, user.id, user.email)
     return {
         "message": "Account created. Check your email for a code to verify your account.",
         "email_sent": email_sent,
@@ -289,6 +289,16 @@ def _send_verification(user_id: int, email: str) -> bool:
     token = auth.create_verification_token(user_id)
     code = auth.create_verification_otp(user_id)
     return email_service.send_verification_email(email, token, code)
+
+
+async def _in_pool_or_false(fn, *args) -> bool:
+    """Email sends block on network I/O (the Gmail script takes a second or
+    two), so run them off the event loop; any failure counts as "not sent"."""
+    try:
+        return bool(await run_in_pool(fn, *args, timeout=IO_TIMEOUT_SEC))
+    except Exception as exc:
+        print(f"[email] {getattr(fn, '__name__', fn)} failed: {type(exc).__name__}: {exc}", flush=True)
+        return False
 
 
 _OTP_ERRORS = {
@@ -317,7 +327,7 @@ async def resend_verification(req: ResendVerificationRequest):
     # The cooldown stops repeated clicks from flooding the inbox (and from
     # resetting the wrong-try counter over and over).
     if user and not user["is_verified"] and not auth.otp_sent_recently(user["id"]):
-        _send_verification(user["id"], user["email"])
+        await _in_pool_or_false(_send_verification, user["id"], user["email"])
     return {"message": "If that email has a pending account, a new code has been sent."}
 
 
@@ -369,7 +379,7 @@ async def forgot_password(req: ForgotPasswordRequest):
     user = auth.get_user_by_email(req.email)
     if user:
         token = auth.create_reset_token(user["id"])
-        email_service.send_password_reset_email(user["email"], token)
+        await _in_pool_or_false(email_service.send_password_reset_email, user["email"], token)
     return {"message": "If that email has an account, a password reset link has been sent."}
 
 

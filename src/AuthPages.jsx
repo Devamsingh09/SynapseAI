@@ -187,9 +187,9 @@ function VerifyCodePanel({ email, emailSent = true, sentJustNow = false, onChang
   return (
     <>
       {!emailSent && (
-        <FieldNotice>
-          Email sending isn't configured on this server yet — check the backend server log for the code (dev mode).
-        </FieldNotice>
+        <FieldError>
+          We couldn't send the email just now. Wait a moment, then tap “Send a new code”.
+        </FieldError>
       )}
       <form className="auth-form" onSubmit={(e) => { e.preventDefault(); submit(code); }}>
         <div className="field">

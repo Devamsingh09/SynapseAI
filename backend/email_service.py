@@ -1,15 +1,22 @@
 """
-Transactional email for auth flows (verification + password reset) via
-Resend's free tier (https://resend.com — 100 emails/day / 3,000/month free).
+Transactional email for auth flows (verification + password reset) and
+feedback.
 
-Dev fallback: if RESEND_API_KEY isn't set, emails are printed to the server
-log instead of sent — so signup/verify/reset can be exercised end-to-end
-locally before you've created a Resend account. Never raises on send
-failure; callers treat "email didn't send" as non-fatal (see auth routes
-in main.py) so a flaky/unconfigured mail provider never blocks signup.
+Senders, tried in order:
+1. Gmail via a Google Apps Script web app (GMAIL_SCRIPT_URL +
+   GMAIL_SCRIPT_SECRET; script in backend/gmail_sender.gs). Mail comes from
+   the owner's Gmail and can go to anyone (~100 recipients/day). Used
+   because Hugging Face Spaces can't reach SMTP servers, and Resend's shared
+   test sender only delivers to the Resend account's own address.
+2. Resend (RESEND_API_KEY) — also the fallback if the script fails.
+3. Neither set: emails are printed to the server log (local dev).
+
+Never raises on send failure; callers treat "email didn't send" as
+non-fatal so a flaky mail provider never blocks signup.
 """
 import os
 
+import httpx
 from dotenv import load_dotenv
 
 import feedback
@@ -24,6 +31,12 @@ RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "Synapse AI <onboarding@resen
 FEEDBACK_TO_EMAIL = (os.getenv("FEEDBACK_TO_EMAIL") or "devamsingh0009@gmail.com").strip()
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")
 
+GMAIL_SCRIPT_URL = (os.getenv("GMAIL_SCRIPT_URL") or "").strip()
+GMAIL_SCRIPT_SECRET = (os.getenv("GMAIL_SCRIPT_SECRET") or "").strip()
+SENDER_NAME = os.getenv("EMAIL_SENDER_NAME", "Synapse AI")
+SCRIPT_TIMEOUT_SEC = 25
+
+_script_configured = bool(GMAIL_SCRIPT_URL and GMAIL_SCRIPT_SECRET)
 _resend_configured = bool(RESEND_API_KEY)
 if _resend_configured:
     import resend
@@ -31,8 +44,37 @@ if _resend_configured:
     resend.api_key = RESEND_API_KEY
 
 
+def _send_via_gmail_script(to_email: str, subject: str, html: str, reply_to: str = None) -> bool:
+    payload = {
+        "secret": GMAIL_SCRIPT_SECRET,
+        "to": to_email,
+        "subject": subject,
+        "html": html,
+        "name": SENDER_NAME,
+    }
+    if reply_to:
+        payload["replyTo"] = reply_to
+    try:
+        # Apps Script answers a POST with a redirect to the result; httpx
+        # follows it with a GET, which is how these web apps are meant to be called.
+        r = httpx.post(GMAIL_SCRIPT_URL, json=payload, timeout=SCRIPT_TIMEOUT_SEC, follow_redirects=True)
+        data = r.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        print(f"[email_service] Gmail script failed for {to_email}: {type(exc).__name__}: {exc}", flush=True)
+        return False
+    if isinstance(data, dict) and data.get("ok"):
+        return True
+    error = data.get("error") if isinstance(data, dict) else data
+    print(f"[email_service] Gmail script refused {to_email}: {error}", flush=True)
+    return False
+
+
 def _send(to_email: str, subject: str, html: str, reply_to: str = None) -> bool:
+    if _script_configured and _send_via_gmail_script(to_email, subject, html, reply_to):
+        return True
     if not _resend_configured:
+        if _script_configured:
+            return False
         # flush=True — see the note on adaptive_loop's logging: this may run
         # off the main thread via FastAPI's sync-route threadpool.
         print(
